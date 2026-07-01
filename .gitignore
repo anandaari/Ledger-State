@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+ledger.db
+.vscode/
+.claude/
+*.log
+desktop.ini
