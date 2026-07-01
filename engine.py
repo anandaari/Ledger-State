@@ -26,7 +26,11 @@ def get_permanent_modifiers(game_id):
                 modifiers['pop_growth_mod'] += 0.01 # Younger workforce (+1% pop growth)
             elif c['name'] == "The Carbon Transition Tariff":
                 modifiers['gdp_growth_mod'] += 0.03 # Green exports (+3% GDP growth)
-                
+            elif c['name'] == "Krisis Utang Nasional":
+                modifiers['gdp_growth_mod'] += 0.01 # Restored credit trust
+            elif c['name'] == "Gelombang Kriminalitas":
+                modifiers['gdp_growth_mod'] += 0.01 # Safer streets, more investment
+
         elif c['status'] == 'FAILED':
             if c['name'] == "The Infrastructure Bottleneck":
                 modifiers['gdp_growth_mod'] -= 0.01 # Blackouts penalty
@@ -38,7 +42,11 @@ def get_permanent_modifiers(game_id):
                 modifiers['gdp_growth_mod'] -= 0.02 # Aging population penalty
             elif c['name'] == "The Carbon Transition Tariff":
                 modifiers['gdp_growth_mod'] -= 0.03 # Sanctions penalty
-                
+            elif c['name'] == "Krisis Utang Nasional":
+                modifiers['gdp_growth_mod'] -= 0.02 # Lingering credit downgrade
+            elif c['name'] == "Gelombang Kriminalitas":
+                modifiers['gdp_growth_mod'] -= 0.015 # Chronic insecurity penalty
+
     return modifiers
 
 def simulate_turn(game_id, inputs):
@@ -87,23 +95,12 @@ def simulate_turn(game_id, inputs):
     # 2. Retrieve Permanent Modifiers
     perm_mods = get_permanent_modifiers(game_id)
     
-    # 3. Retrieve Crises
+    # 3. Retrieve Crises (crises trigger dynamically once a matching economic
+    # indicator crosses a critical level - see "Dynamic Crisis Triggering"
+    # near the end of this function - instead of a fixed calendar year)
     crises = database.get_crises(game_id)
-    active_crisis = None
-    
-    # Activate and check crises
-    for c in crises:
-        if next_year == c['start_year']:
-            c['status'] = 'ACTIVE'
-            database.update_crisis_state(c['crisis_id'], 0, 'ACTIVE')
-            database.log_event(
-                game_id, next_year, 'CRISIS', f"CRISIS START: {c['name']}",
-                f"Your administration faces a structural crisis: {c['description']} Goal: {c['requirement_desc']}"
-            )
-        
-        if c['status'] == 'ACTIVE':
-            active_crisis = c
-            
+    active_crisis = next((c for c in crises if c['status'] == 'ACTIVE'), None)
+
     # Apply active crisis rules & verify progress conditions
     crisis_penalty_text = ""
     crisis_progress_text = ""
@@ -141,7 +138,19 @@ def simulate_turn(game_id, inputs):
             if (b_inf >= 0.02 * gdp) and (b_sec >= 0.005 * gdp):
                 met_condition = True
             crisis_penalty_text = "Carbon tariffs are weighing heavily on GDP growth (-4.0% per turn)."
-            
+
+        elif name == "Krisis Utang Nasional":
+            # Requirement: total spending <= 8% of GDP (austerity) to rebuild credit trust
+            if total_spending <= 0.08 * gdp:
+                met_condition = True
+            crisis_penalty_text = "Kepercayaan kreditor internasional anjlok, menaikkan suku bunga utang menjadi 9%."
+
+        elif name == "Gelombang Kriminalitas":
+            # Requirement: Security budget >= 2% of GDP
+            if b_sec >= 0.02 * gdp:
+                met_condition = True
+            crisis_penalty_text = "Kriminalitas merajalela menekan produktivitas dan kepercayaan investor."
+
         # Update progress
         new_progress = active_crisis['current_progress']
         if met_condition:
@@ -209,30 +218,41 @@ def simulate_turn(game_id, inputs):
     shock_value = 0.0
     shock_desc = ""
     rand_val = random.random()
-    if rand_val < 0.10: # Global Recession
+    if rand_val < 0.08: # Global Recession
         shock_event = "Global Recession"
         shock_value = -0.03
         shock_desc = "A major contraction in global markets drops Novus's GDP growth by -3.0%."
-    elif rand_val < 0.18: # Commodity Boom
+    elif rand_val < 0.15: # Commodity Boom
         shock_event = "Resource Market Boom"
         shock_value = 0.02
         shock_desc = "High global demand for exports boosts Novus's GDP growth by +2.0%."
-    elif rand_val < 0.22: # Cyber attack
+    elif rand_val < 0.19: # Cyber attack
         shock_event = "Cyber Ransom Attack"
         shock_value = -0.01
         # Stolen cash scales with GDP size
         stolen_cash = round(gdp * 0.03, 1) # 3% of GDP
         shock_desc = f"Hackers disrupt digital infrastructure, lowering GDP by -1.0% and stealing ${stolen_cash}B from treasury."
-    elif rand_val < 0.27: # Tech boom
+    elif rand_val < 0.24: # Tech boom
         shock_event = "AI Core Breakthrough"
         shock_value = 0.035
         shock_desc = "Local researchers invent an optimized automation algorithm. GDP growth surges by +3.5%!"
+    elif rand_val < 0.29: # Natural disaster
+        shock_event = "Bencana Alam"
+        shock_value = -0.015
+        shock_desc = "Bencana alam besar merusak infrastruktur dan memaksa pengeluaran dana darurat untuk pemulihan."
+    elif rand_val < 0.35: # Foreign investment windfall
+        shock_event = "Investasi Asing Mengalir"
+        shock_value = 0.015
+        shock_desc = "Investor asing menanamkan modal besar-besaran, mendorong pertumbuhan ekonomi dan menyuntik kas negara."
     else:
         # Standard slight volatility
         shock_value = random.uniform(-0.005, 0.005)
-        
+
     gdp_growth = growth_base + shock_value
-    
+
+    if shock_event == "Bencana Alam":
+        infrastructure = max(0.0, infrastructure - 5.0)  # damage carries into next year's baseline
+
     # Cap growth during Infrastructure crisis
     if active_crisis and active_crisis['name'] == "The Infrastructure Bottleneck":
         gdp_growth = min(gdp_growth, 0.015)
@@ -240,12 +260,27 @@ def simulate_turn(game_id, inputs):
     new_gdp = gdp * (1.0 + gdp_growth)
     new_gdp = max(10.0, new_gdp)
     
+    # 5b. Corruption Dynamics
+    # Corruption only grows through corrupt actions (e.g. bribing the opposition)
+    # applied directly to the DB by apply_bribe(); here it just decays slowly
+    # each year (anti-corruption reform/attrition) and drags down tax efficiency.
+    prev_corruption = prev_state['corruption_index']
+    corruption_index = max(0.0, min(100.0, prev_corruption * 0.92))
+    corruption_penalty = (corruption_index / 100.0) * 0.30  # up to -30% tax efficiency at 100
+
+    if corruption_index >= 50.0 and prev_corruption < 50.0:
+        database.log_event(
+            game_id, next_year, 'SOCIAL', "Korupsi Merajalela",
+            "Indeks Korupsi melewati 50%, secara signifikan menggerus efisiensi penerimaan pajak dan kepercayaan publik."
+        )
+
     # 6. Revenues (Class-based tax contributions)
     # Low-income generates less tax per capita; High-income generates much more.
     tax_eff = 0.90 + 0.10 * (education_index / 100.0)
     if active_crisis and active_crisis['name'] == "The Demographic Cliff":
         tax_eff *= 0.80 # 20% loss due to smaller active working class
-        
+    tax_eff *= (1.0 - corruption_penalty)
+
     emp = prev_state['employment_rate']
     rev_low = new_gdp * r_low * tax_low * emp * 0.5
     rev_mid = new_gdp * r_mid * tax_mid * emp * 1.0
@@ -253,17 +288,25 @@ def simulate_turn(game_id, inputs):
     
     revenue = (rev_low + rev_mid + rev_high) * tax_eff
     
-    # Debt Interest (6% per year on national debt)
+    # Debt Interest (6% per year on national debt, 9% during a debt crisis)
     debt_interest = 0.0
     if prev_state['treasury'] < 0:
-        debt_interest = abs(prev_state['treasury']) * 0.06
-        
+        interest_rate = 0.06
+        if active_crisis and active_crisis['name'] == "Krisis Utang Nasional":
+            interest_rate = 0.09  # credit downgrade
+        debt_interest = abs(prev_state['treasury']) * interest_rate
+
     total_costs = total_spending + debt_interest
-    
+
     if shock_event == "Cyber Ransom Attack":
         total_costs += round(gdp * 0.03, 1)
-        
+    elif shock_event == "Bencana Alam":
+        total_costs += round(gdp * 0.02, 1)  # emergency relief spending
+
     new_treasury = prev_state['treasury'] + revenue - total_costs
+
+    if shock_event == "Investasi Asing Mengalir":
+        new_treasury += round(gdp * 0.02, 1)
     
     # 7. Labor & Welfare Calculations
     new_employment = 0.82 + 0.4 * gdp_growth + 0.05 * (infrastructure / 100.0) - 0.12 * avg_tax_rate
@@ -273,7 +316,10 @@ def simulate_turn(game_id, inputs):
     target_security = new_gdp * 0.025
     sec_factor = min(1.0, b_sec / max(0.1, target_security))
     crime_factor = max(0.0, 1.0 - (0.6 * sec_factor + 0.4 * new_employment))
-    
+    if active_crisis and active_crisis['name'] == "Gelombang Kriminalitas":
+        crime_factor = min(1.0, crime_factor + 0.15)
+
+
     # Welfare efficiency
     welf_efficiency = 1.0
     if active_crisis and active_crisis['name'] == "The Demographic Cliff":
@@ -298,7 +344,9 @@ def simulate_turn(game_id, inputs):
             new_happiness -= 6.0
         elif active_crisis['name'] == "The Public Health Epidemic":
             new_happiness -= 8.0
-            
+
+    new_happiness -= corruption_index * 0.05  # public distrust from corruption, up to -5 at 100%
+
     new_happiness = max(0.0, min(100.0, new_happiness))
 
     # 8b. Political Opposition Dynamics
@@ -414,27 +462,131 @@ def simulate_turn(game_id, inputs):
     p_low = max(1000, p_low + new_births - int(deaths_workers * r_low))
     p_mid = max(1000, p_mid - int(deaths_workers * r_mid))
     p_high = max(1000, p_high - int(deaths_workers * r_high))
-    
+
+    new_p_total = p_low + p_mid + p_high + p_elder
+    new_elder_ratio = p_elder / new_p_total
+
+    # 9b. Dynamic Crisis Triggering
+    # Instead of a fixed calendar year, each crisis fires once its matching
+    # indicator crosses a critical level - different playthroughs run into
+    # different crises depending on how the economy is actually managed.
+    # A short cooldown after the last crisis ends keeps them from stacking.
+    if active_crisis is None:
+        ended_years = [c['start_year'] + c['duration_turns'] for c in crises if c['status'] in ('SOLVED', 'FAILED') and c['start_year']]
+        last_crisis_end = max(ended_years) if ended_years else -999
+        if next_year - last_crisis_end >= 3:
+            trigger_checks = [
+                ("The Infrastructure Bottleneck", infrastructure < 35.0),
+                ("The Public Health Epidemic", health_index < 35.0),
+                ("The Brain Drain Crisis", tax_high >= 0.50),
+                ("The Demographic Cliff", new_elder_ratio >= 0.22),
+                ("The Carbon Transition Tariff", infrastructure >= 70.0),
+                ("Krisis Utang Nasional", new_treasury < -(new_gdp * 0.80)),
+                ("Gelombang Kriminalitas", crime_factor >= 0.45),
+            ]
+            for crisis_name, condition_met in trigger_checks:
+                if not condition_met:
+                    continue
+                candidate = next((c for c in crises if c['name'] == crisis_name and c['status'] == 'INACTIVE'), None)
+                if candidate is None:
+                    continue
+                database.update_crisis_state(candidate['crisis_id'], 0, 'ACTIVE', start_year=next_year)
+                database.log_event(
+                    game_id, next_year, 'CRISIS', f"CRISIS START: {crisis_name}",
+                    f"Your administration faces a structural crisis: {candidate['description']} Goal: {candidate['requirement_desc']}"
+                )
+                break  # only one new crisis per turn
+
     # 10. Log Events in DB
     if shock_event:
         impacts = {'gdp': shock_value}
         if shock_event == "Cyber Ransom Attack":
             impacts['treasury'] = -round(gdp * 0.03, 1)
+        elif shock_event == "Bencana Alam":
+            impacts['treasury'] = -round(gdp * 0.02, 1)
+        elif shock_event == "Investasi Asing Mengalir":
+            impacts['treasury'] = round(gdp * 0.02, 1)
         database.log_event(game_id, next_year, 'ECONOMIC', f"EVENT: {shock_event}", shock_desc, impacts)
-        
+
     if new_treasury < 0:
         database.log_event(
-            game_id, next_year, 'ECONOMIC', "Debt Accumulation", 
+            game_id, next_year, 'ECONOMIC', "Debt Accumulation",
             f"{country_name} is running a sovereign debt of ${abs(new_treasury):.1f}B. Interest paid this year: ${debt_interest:.2f}B.",
             {'treasury_debt': debt_interest}
         )
-        
+
     if new_happiness < 30:
         database.log_event(
-            game_id, next_year, 'SOCIAL', "Widespread Protests", 
+            game_id, next_year, 'SOCIAL', "Widespread Protests",
             f"Low general happiness ({new_happiness:.1f}%) has triggered widespread labor strikes, reducing work productivity."
         )
-        
+
+    # 10b. News Feed Milestones - flavor & informational events tied to
+    # economic/social indicators crossing a meaningful threshold this turn.
+    if gdp_growth >= 0.05:
+        database.log_event(
+            game_id, next_year, 'ECONOMIC', "Ledakan Pertumbuhan Ekonomi",
+            f"Pertumbuhan GDP mencapai {gdp_growth * 100:.1f}% tahun ini, salah satu yang tertinggi dalam sejarah {country_name}."
+        )
+
+    if prev_state['treasury'] < 0 and new_treasury >= 0:
+        database.log_event(
+            game_id, next_year, 'ECONOMIC', "Utang Nasional Lunas!",
+            f"Setelah bertahun-tahun defisit, treasury {country_name} kembali positif sebesar ${new_treasury:.1f}B."
+        )
+
+    if prev_state['education_index'] < 80.0 <= education_index:
+        database.log_event(
+            game_id, next_year, 'ECONOMIC', "Bangsa Terpelajar",
+            "Indeks Pendidikan melampaui 80%, menempatkan tenaga kerja di jajaran paling terampil di dunia."
+        )
+    if prev_state['education_index'] >= 20.0 > education_index:
+        database.log_event(
+            game_id, next_year, 'SOCIAL', "Krisis Pendidikan Akut",
+            "Indeks Pendidikan jatuh di bawah 20%, sekolah-sekolah kekurangan dana secara kronis."
+        )
+
+    if prev_state['health_index'] < 80.0 <= health_index:
+        database.log_event(
+            game_id, next_year, 'ECONOMIC', "Layanan Kesehatan Unggul",
+            "Indeks Kesehatan melampaui 80%, harapan hidup warga meningkat signifikan."
+        )
+    if prev_state['health_index'] >= 20.0 > health_index:
+        database.log_event(
+            game_id, next_year, 'SOCIAL', "Sistem Kesehatan Kolaps",
+            "Indeks Kesehatan jatuh di bawah 20%, rumah sakit kewalahan menangani pasien."
+        )
+
+    if prev_state['employment_rate'] < 0.95 <= new_employment:
+        database.log_event(
+            game_id, next_year, 'ECONOMIC', "Lapangan Kerja Penuh Tercapai",
+            "Tingkat pengangguran mendekati nol, hampir seluruh angkatan kerja terserap."
+        )
+    if prev_state['employment_rate'] >= 0.50 > new_employment:
+        database.log_event(
+            game_id, next_year, 'SOCIAL', "Pengangguran Massal",
+            "Tingkat kerja anjlok di bawah 50%, memicu keresahan sosial luas."
+        )
+
+    if crime_factor >= 0.30:
+        database.log_event(
+            game_id, next_year, 'SOCIAL', "Kriminalitas Meningkat",
+            f"Indeks kriminalitas naik ke level mengkhawatirkan ({crime_factor * 100:.0f}%), warga menuntut penambahan anggaran keamanan."
+        )
+
+    if r_elder < 0.15 <= new_elder_ratio:
+        database.log_event(
+            game_id, next_year, 'SOCIAL', "Populasi Mulai Menua",
+            "Proporsi warga lanjut usia melampaui 15% dari populasi, menandakan pergeseran struktur demografi."
+        )
+
+    total_promotions = promo_low_to_mid + promo_mid_to_high
+    if total_promotions >= 0.015 * new_p_total:
+        database.log_event(
+            game_id, next_year, 'ECONOMIC', "Mobilitas Sosial Pesat",
+            f"{total_promotions:,} warga naik kelas ekonomi tahun ini, didorong oleh investasi pendidikan yang kuat."
+        )
+
     # Commit changes
     new_state = {
         'turn_year': next_year,
@@ -445,11 +597,13 @@ def simulate_turn(game_id, inputs):
         'pop_high': p_high,
         'pop_elder': p_elder,
         'employment_rate': round(new_employment, 3),
+        'crime_rate': round(crime_factor, 3),
         'happiness': round(new_happiness, 1),
         'education_index': round(education_index, 1),
         'health_index': round(health_index, 1),
         'infrastructure': round(infrastructure, 1),
         'opposition_strength': round(opposition_strength, 1),
+        'corruption_index': round(corruption_index, 1),
         'tax_low': tax_low,
         'tax_mid': tax_mid,
         'tax_high': tax_high,

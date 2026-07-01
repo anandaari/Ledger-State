@@ -44,7 +44,7 @@ COUNTRY_PRESETS = {
         "pop_high": 12400000,   # 10%
         "pop_elder": 24800000,  # 20% elderly ratio
         "gdp": 4200.0,          # $4,200B
-        "treasury": -10500.0,   # -$10,500B debt
+        "treasury": -5000.0,    # -$5,000B debt (~119% of GDP - realistically high but still under the -150% bankruptcy line)
         "tax_low": 0.08,
         "tax_mid": 0.20,
         "tax_high": 0.45,
@@ -103,7 +103,7 @@ def _schema_is_stale(cursor):
     if 'nation_history' in existing_tables:
         cursor.execute("PRAGMA table_info(nation_history)")
         cols = {row[1] for row in cursor.fetchall()}
-        if not {'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'tax_low', 'tax_mid', 'tax_high', 'opposition_strength'}.issubset(cols):
+        if not {'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'tax_low', 'tax_mid', 'tax_high', 'opposition_strength', 'corruption_index', 'crime_rate'}.issubset(cols):
             return True
 
     return False
@@ -144,11 +144,13 @@ def init_db(db_path=DB_PATH):
         pop_high INTEGER NOT NULL,
         pop_elder INTEGER NOT NULL,
         employment_rate REAL NOT NULL,
+        crime_rate REAL NOT NULL,
         happiness REAL NOT NULL,
         education_index REAL NOT NULL,
         health_index REAL NOT NULL,
         infrastructure REAL NOT NULL,
         opposition_strength REAL NOT NULL,
+        corruption_index REAL NOT NULL,
 
         -- Inputs
         tax_low REAL NOT NULL,
@@ -222,10 +224,10 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
     cursor.execute("""
     INSERT INTO nation_history (
         game_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
-        employment_rate, happiness, education_index, health_index, infrastructure, opposition_strength,
+        employment_rate, crime_rate, happiness, education_index, health_index, infrastructure, opposition_strength, corruption_index,
         tax_low, tax_mid, tax_high,
         budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         game_id, initial_year,
         preset["treasury"],
@@ -235,11 +237,13 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
         preset["pop_high"],
         preset["pop_elder"],
         0.80,
+        0.44,
         55.0,
         50.0,
         50.0,
         50.0,
         15.0,
+        0.0,
         preset["tax_low"],
         preset["tax_mid"],
         preset["tax_high"],
@@ -266,29 +270,40 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
         json.dumps({})
     ))
 
-    # Seed 5-Year Crises
+    # Seed crises as INACTIVE with no start_year yet - engine.py triggers each
+    # one dynamically once its matching economic/social indicator crosses a
+    # critical level (see simulate_turn's "Dynamic Crisis Triggering" section),
+    # instead of a fixed calendar year. start_year is filled in at that point.
     crises_data = [
-        (game_id, "The Infrastructure Bottleneck", 2031, 3, 0, 2, 'INACTIVE', 
+        (game_id, "The Infrastructure Bottleneck", 0, 3, 0, 2, 'INACTIVE',
          "Rapid industrial growth has overloaded the nation's power grids and road systems.",
          "Keep Infrastructure budget at or above 1.5% of your total GDP for 2 turns during the crisis duration."),
-        
-        (game_id, "The Public Health Epidemic", 2036, 4, 0, 3, 'INACTIVE',
+
+        (game_id, "The Public Health Epidemic", 0, 4, 0, 3, 'INACTIVE',
          "A highly contagious virus is spreading due to public health underfunding.",
          "Keep Healthcare budget at or above 20% of your total budget AND low-bracket tax rate at or above 8% for 3 turns to build facilities and fund vaccines."),
-        
-        (game_id, "The Brain Drain Crisis", 2041, 4, 0, 3, 'INACTIVE',
+
+        (game_id, "The Brain Drain Crisis", 0, 4, 0, 3, 'INACTIVE',
          "Your highly educated citizens are fleeing the nation due to high tax rates on the high-income bracket.",
          "Reduce Tax Rate on High-Income to below 20% AND keep Social Welfare budget at or above 10% of total spending for 3 turns to retain elite talent."),
-        
-        (game_id, "The Demographic Cliff", 2046, 5, 0, 3, 'INACTIVE',
+
+        (game_id, "The Demographic Cliff", 0, 5, 0, 3, 'INACTIVE',
          "A record drop in birth rates has caused a severe aging crisis, putting strain on active workers.",
          "Keep Welfare budget above 3% of your GDP (family subsidies) OR keep combined Security & Infrastructure spending at 15% of total budget (to support high-skill immigration) for 3 turns."),
-        
-        (game_id, "The Carbon Transition Tariff", 2051, 4, 0, 3, 'INACTIVE',
+
+        (game_id, "The Carbon Transition Tariff", 0, 4, 0, 3, 'INACTIVE',
          "Global partners threat trade sanctions on the country's carbon emissions unless clean production targets are met.",
-         "Keep Infrastructure budget above 2.0% of your GDP (green grid) AND Security budget above 0.5% of your GDP (emissions enforcement) for 3 turns.")
+         "Keep Infrastructure budget above 2.0% of your GDP (green grid) AND Security budget above 0.5% of your GDP (emissions enforcement) for 3 turns."),
+
+        (game_id, "Krisis Utang Nasional", 0, 4, 0, 3, 'INACTIVE',
+         "Investor internasional mulai gelisah - rasio utang terhadap GDP negara Anda melewati batas aman, memicu spekulasi soal kemampuan bayar.",
+         "Turunkan total belanja (Pendidikan+Kesehatan+Infrastruktur+Kesejahteraan+Keamanan) ke 8% atau kurang dari GDP selama 3 tahun untuk memulihkan kepercayaan kreditor."),
+
+        (game_id, "Gelombang Kriminalitas", 0, 4, 0, 3, 'INACTIVE',
+         "Lemahnya penegakan hukum memicu lonjakan kejahatan yang menekan produktivitas dan menakuti investor.",
+         "Pertahankan anggaran Keamanan di atas 2% dari GDP selama 3 tahun untuk memulihkan ketertiban."),
     ]
-    
+
     cursor.executemany("""
     INSERT INTO crises (game_id, name, start_year, duration_turns, current_progress, target_progress, status, description, requirement_desc)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -303,7 +318,7 @@ def get_latest_turn(game_id, db_path=DB_PATH):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT history_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
-               employment_rate, happiness, education_index, health_index, infrastructure, opposition_strength,
+               employment_rate, crime_rate, happiness, education_index, health_index, infrastructure, opposition_strength, corruption_index,
                tax_low, tax_mid, tax_high,
                budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security
         FROM nation_history
@@ -315,7 +330,7 @@ def get_latest_turn(game_id, db_path=DB_PATH):
     if row:
         columns = [
             'history_id', 'turn_year', 'treasury', 'gdp', 'pop_low', 'pop_mid', 'pop_high', 'pop_elder',
-            'employment_rate', 'happiness', 'education_index', 'health_index', 'infrastructure', 'opposition_strength',
+            'employment_rate', 'crime_rate', 'happiness', 'education_index', 'health_index', 'infrastructure', 'opposition_strength', 'corruption_index',
             'tax_low', 'tax_mid', 'tax_high',
             'budget_education', 'budget_health', 'budget_infrastructure', 'budget_welfare', 'budget_security'
         ]
@@ -328,7 +343,7 @@ def get_history(game_id, db_path=DB_PATH):
     cursor.execute("""
         SELECT turn_year, treasury, gdp, (pop_low + pop_mid + pop_high + pop_elder) as population,
                employment_rate, happiness, education_index, health_index, infrastructure,
-               tax_low, tax_mid, tax_high, pop_low, pop_mid, pop_high, pop_elder, opposition_strength
+               tax_low, tax_mid, tax_high, pop_low, pop_mid, pop_high, pop_elder, opposition_strength, corruption_index, crime_rate
         FROM nation_history
         WHERE game_id = ?
         ORDER BY turn_year ASC
@@ -343,15 +358,15 @@ def save_turn_state(game_id, data, db_path=DB_PATH):
     cursor.execute("""
     INSERT INTO nation_history (
         game_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
-        employment_rate, happiness, education_index, health_index, infrastructure, opposition_strength,
+        employment_rate, crime_rate, happiness, education_index, health_index, infrastructure, opposition_strength, corruption_index,
         tax_low, tax_mid, tax_high,
         budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         game_id, data['turn_year'], data['treasury'], data['gdp'],
         data['pop_low'], data['pop_mid'], data['pop_high'], data['pop_elder'],
-        data['employment_rate'], data['happiness'], data['education_index'],
-        data['health_index'], data['infrastructure'], data['opposition_strength'],
+        data['employment_rate'], data['crime_rate'], data['happiness'], data['education_index'],
+        data['health_index'], data['infrastructure'], data['opposition_strength'], data['corruption_index'],
         data['tax_low'], data['tax_mid'], data['tax_high'],
         data['budget_education'], data['budget_health'], data['budget_infrastructure'],
         data['budget_welfare'], data['budget_security']
@@ -419,14 +434,21 @@ def get_crises(game_id, db_path=DB_PATH):
         crises.append(dict(zip(columns, r)))
     return crises
 
-def update_crisis_state(crisis_id, current_progress, status, db_path=DB_PATH):
+def update_crisis_state(crisis_id, current_progress, status, start_year=None, db_path=DB_PATH):
     conn = get_connection(db_path)
     cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE crises
-        SET current_progress = ?, status = ?
-        WHERE crisis_id = ?
-    """, (current_progress, status, crisis_id))
+    if start_year is not None:
+        cursor.execute("""
+            UPDATE crises
+            SET current_progress = ?, status = ?, start_year = ?
+            WHERE crisis_id = ?
+        """, (current_progress, status, start_year, crisis_id))
+    else:
+        cursor.execute("""
+            UPDATE crises
+            SET current_progress = ?, status = ?
+            WHERE crisis_id = ?
+        """, (current_progress, status, crisis_id))
     conn.commit()
     conn.close()
 
@@ -445,3 +467,39 @@ def get_party_name(game_id, db_path=DB_PATH):
     row = cursor.fetchone()
     conn.close()
     return row[0] if row and row[0] else next(iter(PARTY_PRESETS))
+
+def apply_bribe(game_id, db_path=DB_PATH):
+    """
+    Spends $100B from the treasury of the current (not-yet-ended) turn to
+    buy off opposition figures, cutting Opposition Strength by 10 points.
+    Updates the latest row in place instead of inserting a new turn, since
+    this is an emergency action, not a full fiscal year.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT history_id, turn_year, treasury, opposition_strength, corruption_index
+        FROM nation_history WHERE game_id = ? ORDER BY turn_year DESC LIMIT 1
+    """, (game_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+
+    history_id, turn_year, treasury, opposition_strength, corruption_index = row
+    new_treasury = treasury - 100.0
+    new_opposition = max(0.0, opposition_strength - 10.0)
+    new_corruption = min(100.0, corruption_index + 8.0)
+
+    cursor.execute("""
+        UPDATE nation_history SET treasury = ?, opposition_strength = ?, corruption_index = ? WHERE history_id = ?
+    """, (new_treasury, new_opposition, new_corruption, history_id))
+    conn.commit()
+    conn.close()
+
+    log_event(
+        game_id, turn_year, 'SOCIAL', "Suap Politisi",
+        f"Anda menyuap tokoh-tokoh oposisi senilai $100B untuk meredam ketegangan politik. Kekuatan oposisi turun menjadi {new_opposition:.1f}%, namun Indeks Korupsi naik menjadi {new_corruption:.1f}%.",
+        db_path=db_path
+    )
+    return {'treasury': new_treasury, 'opposition_strength': new_opposition, 'corruption_index': new_corruption}

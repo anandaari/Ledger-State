@@ -117,7 +117,7 @@ def show_dashboard(game_id):
     df_history = pd.DataFrame(history, columns=[
         'turn_year', 'treasury', 'gdp', 'population', 'employment_rate', 'happiness',
         'education_index', 'health_index', 'infrastructure', 'tax_low', 'tax_mid', 'tax_high',
-        'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'opposition_strength'
+        'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'opposition_strength', 'corruption_index', 'crime_rate'
     ])
     
     p_low = latest_state['pop_low']
@@ -276,6 +276,31 @@ def show_dashboard(game_id):
         
     st.divider()
 
+    # Row 1.2: Monitoring Ekonomi & Sosial (percentage-based indicators)
+    employment_pct = latest_state['employment_rate'] * 100.0
+    crime_pct = latest_state['crime_rate'] * 100.0
+    debt_to_gdp_pct = (latest_state['treasury'] / latest_state['gdp']) * 100.0
+
+    employment_delta = 0.0
+    crime_delta = 0.0
+    debt_to_gdp_delta = 0.0
+    if len(df_history) >= 2:
+        employment_delta = float((df_history['employment_rate'].iloc[-1] - df_history['employment_rate'].iloc[-2]) * 100.0)
+        crime_delta = float((df_history['crime_rate'].iloc[-1] - df_history['crime_rate'].iloc[-2]) * 100.0)
+        prev_debt_to_gdp = (df_history['treasury'].iloc[-2] / df_history['gdp'].iloc[-2]) * 100.0
+        debt_to_gdp_delta = debt_to_gdp_pct - prev_debt_to_gdp
+
+    st.write("### 📉 Monitoring Ekonomi & Sosial")
+    col_m1, col_m2, col_m3 = st.columns(3)
+    with col_m1:
+        st.metric("Employment Rate", f"{employment_pct:.1f}%", delta=f"{employment_delta:+.1f}%")
+    with col_m2:
+        st.metric("Crime Rate", f"{crime_pct:.1f}%", delta=f"{crime_delta:+.1f}%", delta_color="inverse")
+    with col_m3:
+        st.metric("Rasio Utang/GDP", f"{debt_to_gdp_pct:.1f}%", delta=f"{debt_to_gdp_delta:+.1f}%")
+        st.caption("Ambang bangkrut di -150%")
+    st.divider()
+
     # Row 1.5: Political Climate (Ruling Party vs Opposition)
     opp_strength = latest_state['opposition_strength']
     opp_status = "🔴 Kritis" if opp_strength >= 80 else ("🟠 Waspada" if opp_strength >= 50 else "🟢 Terkendali")
@@ -283,6 +308,23 @@ def show_dashboard(game_id):
     st.progress(opp_strength / 100.0, text=f"Kekuatan Oposisi: {opp_strength:.1f}% — {opp_status}")
     if opp_strength >= 80:
         st.error("Oposisi sangat kuat. Dua tahun berturut-turut di atas 85% akan memicu Mosi Tidak Percaya dan menjatuhkan pemerintahan Anda.")
+
+    corruption = latest_state['corruption_index']
+    corruption_status = "🔴 Parah" if corruption >= 50 else ("🟠 Waspada" if corruption >= 20 else "🟢 Bersih")
+    st.progress(corruption / 100.0, text=f"Indeks Korupsi: {corruption:.1f}% — {corruption_status} (mengurangi efisiensi pajak & kepercayaan publik)")
+
+    bribe_key = f"bribed_{game_id}_{latest_state['turn_year']}"
+    already_bribed = st.session_state.get(bribe_key, False)
+    col_bribe1, col_bribe2 = st.columns([3, 1])
+    with col_bribe1:
+        st.caption("Butuh cara cepat meredam oposisi? Suap tokoh-tokoh politiknya (maksimal sekali per tahun) — tapi menaikkan Indeks Korupsi.")
+    with col_bribe2:
+        if st.button("💰 Bribe the Politician (-$100B)", disabled=already_bribed):
+            database.apply_bribe(game_id)
+            st.session_state[bribe_key] = True
+            st.rerun()
+    if already_bribed:
+        st.caption("✅ Anda sudah menyuap politisi tahun ini.")
     st.divider()
 
     # Row 2: Crisis and Alert Center
