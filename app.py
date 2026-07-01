@@ -36,6 +36,11 @@ st.markdown("""
 
 # Main logic
 def main():
+    # Always verify/repair the DB schema on boot - not just when a new game is
+    # created - so a stale ledger.db left over from an older deploy (missing
+    # newer columns like corruption_index/crime_rate) can't crash the dashboard.
+    database.init_db()
+
     st.title("🏛️ LEDGER STATE")
     st.write("Novus Macroeconomic Command & Control Ledger. Manage class brackets, control sovereign debt, survive the crises.")
     st.divider()
