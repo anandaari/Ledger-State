@@ -62,7 +62,7 @@ def simulate_turn(game_id, inputs):
     next_year = current_year + 1
     country_name = database.get_country_name(game_id)
     
-    # 1. Gather Inputs (3 tax brackets, 5 budget allocations)
+    # 1. Gather Inputs (3 tax brackets, 5 budget allocations, min wage, export tariff)
     tax_low = inputs['tax_low']
     tax_mid = inputs['tax_mid']
     tax_high = inputs['tax_high']
@@ -71,9 +71,12 @@ def simulate_turn(game_id, inputs):
     b_inf = inputs['budget_infrastructure']
     b_welf = inputs['budget_welfare']
     b_sec = inputs['budget_security']
-    
+    min_wage = inputs['min_wage']          # 0-100 policy intensity, not a literal wage figure
+    export_tariff = inputs['export_tariff']  # 0-30% tax on exported goods
+
     total_spending = b_ed + b_hl + b_inf + b_welf + b_sec
     gdp = prev_state['gdp']
+    export_dependency = database.COUNTRY_PRESETS.get(country_name, database.COUNTRY_PRESETS["Indonesia"])['export_dependency']
     
     # Ratios to GDP
     ed_ratio = b_ed / gdp
@@ -94,7 +97,15 @@ def simulate_turn(game_id, inputs):
     
     # 2. Retrieve Permanent Modifiers
     perm_mods = get_permanent_modifiers(game_id)
-    
+
+    # 2b. Retrieve Cabinet - each hired advisor boosts their linked stat every
+    # turn and costs an ongoing salary, deducted from treasury like any other
+    # spending line.
+    cabinet = database.get_cabinet(game_id)
+    cabinet_bonus = {c['position']: c['bonus_value'] for c in cabinet}
+    cabinet_salaries = sum(c['salary'] for c in cabinet)
+
+
     # 3. Retrieve Crises (crises trigger dynamically once a matching economic
     # indicator crosses a critical level - see "Dynamic Crisis Triggering"
     # near the end of this function - instead of a fixed calendar year)
@@ -189,17 +200,20 @@ def simulate_turn(game_id, inputs):
     if active_crisis and active_crisis['name'] == "The Brain Drain Crisis":
         education_decay = 0.90 # Brain drain increases loss of skill
     education_index = prev_state['education_index'] * education_decay + 100 * ed_ratio
+    education_index += cabinet_bonus.get("Menteri Pendidikan", 0.0)
     education_index = max(0.0, min(100.0, education_index))
-    
+
     health_decay = 0.95
     if active_crisis and active_crisis['name'] == "The Public Health Epidemic":
         health_decay = 0.85 # Epidemic decays health faster
     health_bonus = perm_mods['health_bonus']
     health_index = prev_state['health_index'] * health_decay + 100 * hl_ratio + health_bonus
+    health_index += cabinet_bonus.get("Menteri Kesehatan", 0.0)
     health_index = max(0.0, min(100.0, health_index))
-    
+
     infra_efficiency = perm_mods['infra_efficiency']
     infrastructure = prev_state['infrastructure'] * 0.93 + 120 * inf_ratio * infra_efficiency
+    infrastructure += cabinet_bonus.get("Menteri Infrastruktur", 0.0)
     infrastructure = max(0.0, min(100.0, infrastructure))
     
     # 5. Economic simulation
@@ -209,10 +223,15 @@ def simulate_turn(game_id, inputs):
     # Base GDP growth
     growth_base = 0.045 * (education_index / 100.0) * (infrastructure / 100.0) - 0.16 * avg_tax_rate
     growth_base += perm_mods['gdp_growth_mod']
-    
+
+    # Minimum wage raises labor costs; export tariffs hurt competitiveness in
+    # proportion to how export-dependent the country's economy is.
+    growth_base -= (min_wage / 100.0) * 0.02
+    growth_base -= export_dependency * (export_tariff / 100.0) * 0.05
+
     if active_crisis and active_crisis['name'] == "The Carbon Transition Tariff":
         growth_base -= 0.04 # Carbon sanctions
-        
+
     # Global economic market shock
     shock_event = None
     shock_value = 0.0
@@ -287,7 +306,11 @@ def simulate_turn(game_id, inputs):
     rev_high = new_gdp * r_high * tax_high * emp * 2.5
     
     revenue = (rev_low + rev_mid + rev_high) * tax_eff
-    
+
+    # Export Tariff revenue - scales with how export-dependent the economy is
+    tariff_revenue = new_gdp * export_dependency * (export_tariff / 100.0) * 0.5
+    revenue += tariff_revenue
+
     # Debt Interest (6% per year on national debt, 9% during a debt crisis)
     debt_interest = 0.0
     if prev_state['treasury'] < 0:
@@ -296,7 +319,7 @@ def simulate_turn(game_id, inputs):
             interest_rate = 0.09  # credit downgrade
         debt_interest = abs(prev_state['treasury']) * interest_rate
 
-    total_costs = total_spending + debt_interest
+    total_costs = total_spending + debt_interest + cabinet_salaries
 
     if shock_event == "Cyber Ransom Attack":
         total_costs += round(gdp * 0.03, 1)
@@ -310,6 +333,7 @@ def simulate_turn(game_id, inputs):
     
     # 7. Labor & Welfare Calculations
     new_employment = 0.82 + 0.4 * gdp_growth + 0.05 * (infrastructure / 100.0) - 0.12 * avg_tax_rate
+    new_employment -= (min_wage / 100.0) * 0.08  # higher labor cost prices some workers out of jobs
     new_employment = max(0.40, min(0.98, new_employment))
     
     # Crime Factor
@@ -318,7 +342,7 @@ def simulate_turn(game_id, inputs):
     crime_factor = max(0.0, 1.0 - (0.6 * sec_factor + 0.4 * new_employment))
     if active_crisis and active_crisis['name'] == "Gelombang Kriminalitas":
         crime_factor = min(1.0, crime_factor + 0.15)
-
+    crime_factor = max(0.0, crime_factor - cabinet_bonus.get("Menteri Keamanan", 0.0) / 100.0)
 
     # Welfare efficiency
     welf_efficiency = 1.0
@@ -329,6 +353,7 @@ def simulate_turn(game_id, inputs):
     # 8. Class-Specific Happiness
     # Low-income: highly sensitive to tax_low and welfare
     h_low = 35.0 + 35.0 * new_employment + 25.0 * min(1.0, welfare_ratio) - 50.0 * tax_low - 20.0 * crime_factor
+    h_low += (min_wage / 100.0) * 15.0  # higher minimum wage directly raises low-income living standards
     # Middle-income: balanced sensitivity
     h_mid = 45.0 + 30.0 * new_employment + 15.0 * min(1.0, welfare_ratio) - 40.0 * tax_mid - 12.0 * crime_factor
     # High-income: highly sensitive to high taxes
@@ -346,6 +371,7 @@ def simulate_turn(game_id, inputs):
             new_happiness -= 8.0
 
     new_happiness -= corruption_index * 0.05  # public distrust from corruption, up to -5 at 100%
+    new_happiness += cabinet_bonus.get("Menteri Sosial", 0.0)
 
     new_happiness = max(0.0, min(100.0, new_happiness))
 
@@ -386,6 +412,32 @@ def simulate_turn(game_id, inputs):
             game_id, next_year, 'SOCIAL', "Oposisi di Ambang Kekuatan Penuh",
             f"{opposition_party} kini sangat kuat dan mengancam menjatuhkan pemerintahan Anda melalui mosi tidak percaya."
         )
+
+    # 8c. Election Cycle - every 5 years (all difficulties), Approval Rating
+    # decides the outcome. app.py independently re-derives the same formula
+    # from the saved state to decide the "voted_out" game-over condition, so
+    # a strong mandate here (which lowers opposition_strength) also keeps
+    # that check from failing right after winning.
+    ELECTION_TERM_YEARS = 5
+    years_since_start = next_year - 2026
+    if years_since_start > 0 and years_since_start % ELECTION_TERM_YEARS == 0:
+        approval_rating = 0.6 * new_happiness + 0.4 * (100.0 - opposition_strength)
+        if approval_rating >= 55.0:
+            opposition_strength = max(0.0, opposition_strength - 15.0)
+            database.log_event(
+                game_id, next_year, 'SOCIAL', "Pemilu: Mandat Kuat",
+                f"Rakyat memberikan mandat kuat untuk melanjutkan pemerintahan {party_name} dengan Approval Rating {approval_rating:.1f}%. Kekuatan oposisi mereda."
+            )
+        elif approval_rating >= 40.0:
+            database.log_event(
+                game_id, next_year, 'SOCIAL', "Pemilu: Menang Tipis",
+                f"{party_name} kembali terpilih dengan Approval Rating {approval_rating:.1f}%, namun koalisi pemerintahan rapuh dan oposisi tetap kuat."
+            )
+        else:
+            database.log_event(
+                game_id, next_year, 'SOCIAL', "Pemilu: Kalah",
+                f"Approval Rating anjlok ke {approval_rating:.1f}%. Rakyat memilih {opposition_party} untuk memimpin pemerintahan baru."
+            )
 
     # 9. Demographic Shifts & Mobility
     # Birth rate scales with happiness and healthcare index
@@ -611,8 +663,19 @@ def simulate_turn(game_id, inputs):
         'budget_health': b_hl,
         'budget_infrastructure': b_inf,
         'budget_welfare': b_welf,
-        'budget_security': b_sec
+        'budget_security': b_sec,
+        'min_wage': min_wage,
+        'export_tariff': export_tariff
     }
     
     database.save_turn_state(game_id, new_state)
+
+    # 11. Random Narrative Event - occasionally presents a discrete choice
+    # (not a slider) with immediate consequences, resolved on the next
+    # dashboard load before the player can end another fiscal year.
+    if random.random() < 0.12:
+        eligible = [key for key, ev in database.RANDOM_EVENTS.items() if ev['condition'](new_state)]
+        if eligible:
+            database.create_pending_event(game_id, random.choice(eligible), next_year)
+
     return new_state

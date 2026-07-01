@@ -1,8 +1,26 @@
 import sqlite3
 import json
 import os
+import random
 
 DB_PATH = "ledger.db"
+
+# Static/approximate USD exchange rates - display only, the simulation itself
+# always runs in USD billions internally so saves and math stay consistent.
+# unit_divisor+unit_label keep the displayed number in a readable range
+# (e.g. Rupiah/Yen use "T" for trillion instead of a huge "B" figure).
+CURRENCY_INFO = {
+    "Indonesia": {"symbol": "Rp", "rate_per_usd": 15800, "unit_divisor": 1000, "unit_label": "T"},
+    "Singapore": {"symbol": "S$", "rate_per_usd": 1.34, "unit_divisor": 1, "unit_label": "B"},
+    "United States": {"symbol": "$", "rate_per_usd": 1.0, "unit_divisor": 1, "unit_label": "B"},
+    "Japan": {"symbol": "¥", "rate_per_usd": 155, "unit_divisor": 1000, "unit_label": "T"},
+    "Germany": {"symbol": "€", "rate_per_usd": 0.92, "unit_divisor": 1, "unit_label": "B"},
+}
+
+def format_currency(usd_billions, country_name, decimals=1):
+    info = CURRENCY_INFO.get(country_name, CURRENCY_INFO["United States"])
+    local_value = usd_billions * info["rate_per_usd"] / info["unit_divisor"]
+    return f"{info['symbol']}{local_value:,.{decimals}f}{info['unit_label']}"
 
 COUNTRY_PRESETS = {
     "Singapore": {
@@ -15,6 +33,7 @@ COUNTRY_PRESETS = {
         "tax_low": 0.05,
         "tax_mid": 0.15,
         "tax_high": 0.22,
+        "export_dependency": 0.70,  # highly trade-dependent economy
     },
     "Indonesia": {
         "pop_low": 140000000,   # 50% of 280M
@@ -26,6 +45,7 @@ COUNTRY_PRESETS = {
         "tax_low": 0.05,
         "tax_mid": 0.15,
         "tax_high": 0.30,
+        "export_dependency": 0.25,
     },
     "United States": {
         "pop_low": 85000000,    # 25% of 340M
@@ -37,6 +57,7 @@ COUNTRY_PRESETS = {
         "tax_low": 0.10,
         "tax_mid": 0.22,
         "tax_high": 0.37,
+        "export_dependency": 0.12,  # relatively closed, consumption-driven economy
     },
     "Japan": {
         "pop_low": 24800000,    # 20% of 124M
@@ -48,6 +69,7 @@ COUNTRY_PRESETS = {
         "tax_low": 0.08,
         "tax_mid": 0.20,
         "tax_high": 0.45,
+        "export_dependency": 0.35,
     },
     "Germany": {
         "pop_low": 12600000,    # 15% of 84M
@@ -59,6 +81,7 @@ COUNTRY_PRESETS = {
         "tax_low": 0.08,
         "tax_mid": 0.30,
         "tax_high": 0.42,
+        "export_dependency": 0.50,  # major manufacturing exporter
     }
 }
 
@@ -79,6 +102,105 @@ def get_opposition_party(party_name):
             return name
     return None
 
+# Cabinet: one advisor can be hired per position. Higher tiers cost more to
+# hire and to keep on payroll (salary is deducted from treasury every turn)
+# but give a bigger bonus to the position's linked stat in engine.py.
+CABINET_POSITIONS = ["Menteri Pendidikan", "Menteri Kesehatan", "Menteri Infrastruktur", "Menteri Sosial", "Menteri Keamanan"]
+
+ADVISOR_TIERS = {
+    "Muda": {"bonus": 2.0, "hire_cost": 5.0, "salary": 1.0},
+    "Berpengalaman": {"bonus": 4.0, "hire_cost": 15.0, "salary": 3.0},
+    "Pakar": {"bonus": 7.0, "hire_cost": 35.0, "salary": 6.0},
+}
+
+ADVISOR_NAME_POOL = [
+    "Dr. Siti Amelia", "Prof. Bambang Wirawan", "Dr. Kevin Halim", "Ratna Sari Dewi",
+    "Prof. Agus Santoso", "Dr. Michelle Tanoto", "Hendra Wijaya", "Dr. Farah Nabila",
+    "Prof. Yusuf Kartawijaya", "Dr. Grace Lim",
+]
+
+# Random Narrative Events: occasional turns present the player with a discrete
+# choice (not a slider) that has immediate stat consequences, applied in-place
+# to the current turn like apply_bribe/hire_advisor. 'condition' filters which
+# events are eligible to appear given the just-simulated state. Effect dicts
+# are additive deltas applied to (and clamped where relevant on) the current
+# nation_history row: treasury, gdp, happiness, opposition_strength,
+# corruption_index, infrastructure, health_index, education_index.
+RANDOM_EVENTS = {
+    "imf_loan": {
+        "title": "Tawaran Pinjaman IMF",
+        "description": "IMF menawarkan pinjaman darurat $150B untuk menstabilkan keuangan negara, dengan syarat program penghematan yang tidak populer.",
+        "condition": lambda s: s['treasury'] < 0,
+        "choices": {
+            "Terima Pinjaman": {"treasury": 150.0, "happiness": -15.0, "opposition_strength": 5.0},
+            "Tolak Pinjaman": {"happiness": 5.0},
+        },
+    },
+    "cabinet_scandal": {
+        "title": "Skandal Korupsi Menteri",
+        "description": "Media mengungkap salah satu menteri Anda menerima suap dari kontraktor swasta.",
+        "condition": lambda s: s['corruption_index'] > 30.0,
+        "choices": {
+            "Pecat & Investigasi": {"corruption_index": -20.0, "treasury": -30.0},
+            "Tutupi Skandal": {"corruption_index": 15.0, "opposition_strength": 10.0},
+        },
+    },
+    "foreign_investor": {
+        "title": "Investor Asing Menawarkan Kesepakatan Besar",
+        "description": "Sebuah konsorsium asing menawarkan investasi besar-besaran dengan syarat kelonggaran regulasi.",
+        "condition": lambda s: True,
+        "choices": {
+            "Terima Investasi": {"treasury": 50.0, "gdp": 0.0, "corruption_index": 10.0},
+            "Tolak, Jaga Kedaulatan Ekonomi": {"happiness": 10.0},
+        },
+    },
+    "humanitarian_crisis": {
+        "title": "Bencana Kemanusiaan di Negara Tetangga",
+        "description": "Negara tetangga dilanda bencana besar dan meminta bantuan kemanusiaan dari Novus.",
+        "condition": lambda s: True,
+        "choices": {
+            "Kirim Bantuan": {"treasury": -20.0, "happiness": 10.0},
+            "Fokus ke Dalam Negeri": {"happiness": -5.0},
+        },
+    },
+    "labor_strike": {
+        "title": "Mogok Kerja Nasional",
+        "description": "Serikat buruh di seluruh negeri melakukan mogok kerja massal menuntut kenaikan kesejahteraan.",
+        "condition": lambda s: s['happiness'] < 55.0,
+        "choices": {
+            "Penuhi Tuntutan Buruh": {"treasury": -30.0, "happiness": 10.0},
+            "Tindak Tegas": {"happiness": -15.0, "opposition_strength": 10.0},
+        },
+    },
+    "resource_discovery": {
+        "title": "Penemuan Sumber Daya Alam Baru",
+        "description": "Survei geologi menemukan cadangan sumber daya alam besar yang belum dieksplorasi.",
+        "condition": lambda s: True,
+        "choices": {
+            "Eksploitasi Cepat": {"treasury": 80.0, "health_index": -10.0},
+            "Kembangkan Berkelanjutan": {"treasury": 30.0, "infrastructure": 5.0},
+        },
+    },
+    "cyber_threat": {
+        "title": "Ancaman Siber Skala Besar Terdeteksi",
+        "description": "Badan intelijen mendeteksi rencana serangan siber besar terhadap infrastruktur digital negara sebelum terjadi.",
+        "condition": lambda s: True,
+        "choices": {
+            "Bayar Tebusan Preventif": {"treasury": -40.0},
+            "Perkuat Pertahanan Sendiri": {"infrastructure": -3.0},
+        },
+    },
+    "market_confidence": {
+        "title": "Krisis Kepercayaan Pasar",
+        "description": "Pasar keuangan mulai gelisah akibat ketidakstabilan politik, memicu spekulasi dan pelarian modal.",
+        "condition": lambda s: s['opposition_strength'] > 40.0,
+        "choices": {
+            "Intervensi Pasar": {"treasury": -50.0, "opposition_strength": -10.0},
+            "Biarkan Pasar Menyesuaikan": {"happiness": -10.0, "opposition_strength": 5.0},
+        },
+    },
+}
+
 def get_connection(db_path=DB_PATH):
     return sqlite3.connect(db_path)
 
@@ -97,13 +219,13 @@ def _schema_is_stale(cursor):
     if 'games' in existing_tables:
         cursor.execute("PRAGMA table_info(games)")
         cols = {row[1] for row in cursor.fetchall()}
-        if not {'country_name', 'party_name'}.issubset(cols):
+        if not {'country_name', 'party_name', 'sandbox_mode'}.issubset(cols):
             return True
 
     if 'nation_history' in existing_tables:
         cursor.execute("PRAGMA table_info(nation_history)")
         cols = {row[1] for row in cursor.fetchall()}
-        if not {'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'tax_low', 'tax_mid', 'tax_high', 'opposition_strength', 'corruption_index', 'crime_rate'}.issubset(cols):
+        if not {'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'tax_low', 'tax_mid', 'tax_high', 'opposition_strength', 'corruption_index', 'crime_rate', 'min_wage', 'export_tariff'}.issubset(cols):
             return True
 
     return False
@@ -125,6 +247,7 @@ def init_db(db_path=DB_PATH):
         country_name TEXT NOT NULL,
         party_name TEXT NOT NULL,
         difficulty TEXT DEFAULT 'Medium',
+        sandbox_mode INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
@@ -161,11 +284,13 @@ def init_db(db_path=DB_PATH):
         budget_infrastructure REAL NOT NULL,
         budget_welfare REAL NOT NULL,
         budget_security REAL NOT NULL,
-        
+        min_wage REAL NOT NULL,
+        export_tariff REAL NOT NULL,
+
         FOREIGN KEY(game_id) REFERENCES games(game_id)
     )
     """)
-    
+
     # 3. Turn Events Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS turn_events (
@@ -196,7 +321,33 @@ def init_db(db_path=DB_PATH):
         FOREIGN KEY(game_id) REFERENCES games(game_id)
     )
     """)
-    
+
+    # 5. Cabinet Table - at most one advisor per position per game
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS cabinet (
+        cabinet_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER NOT NULL,
+        position TEXT NOT NULL,
+        advisor_name TEXT NOT NULL,
+        tier TEXT NOT NULL,
+        bonus_value REAL NOT NULL,
+        salary REAL NOT NULL,
+        hired_year INTEGER NOT NULL,
+        FOREIGN KEY(game_id) REFERENCES games(game_id)
+    )
+    """)
+
+    # 6. Pending Events - at most one unresolved narrative choice per game
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS pending_events (
+        pending_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game_id INTEGER NOT NULL,
+        event_key TEXT NOT NULL,
+        turn_year INTEGER NOT NULL,
+        FOREIGN KEY(game_id) REFERENCES games(game_id)
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -226,8 +377,9 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
         game_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
         employment_rate, crime_rate, happiness, education_index, health_index, infrastructure, opposition_strength, corruption_index,
         tax_low, tax_mid, tax_high,
-        budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security,
+        min_wage, export_tariff
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         game_id, initial_year,
         preset["treasury"],
@@ -247,7 +399,8 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
         preset["tax_low"],
         preset["tax_mid"],
         preset["tax_high"],
-        b_ed, b_hl, b_inf, b_welf, b_sec
+        b_ed, b_hl, b_inf, b_welf, b_sec,
+        20.0, 0.0
     ))
 
     # Log initial info event
@@ -320,7 +473,8 @@ def get_latest_turn(game_id, db_path=DB_PATH):
         SELECT history_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
                employment_rate, crime_rate, happiness, education_index, health_index, infrastructure, opposition_strength, corruption_index,
                tax_low, tax_mid, tax_high,
-               budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security
+               budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security,
+               min_wage, export_tariff
         FROM nation_history
         WHERE game_id = ?
         ORDER BY turn_year DESC LIMIT 1
@@ -332,7 +486,8 @@ def get_latest_turn(game_id, db_path=DB_PATH):
             'history_id', 'turn_year', 'treasury', 'gdp', 'pop_low', 'pop_mid', 'pop_high', 'pop_elder',
             'employment_rate', 'crime_rate', 'happiness', 'education_index', 'health_index', 'infrastructure', 'opposition_strength', 'corruption_index',
             'tax_low', 'tax_mid', 'tax_high',
-            'budget_education', 'budget_health', 'budget_infrastructure', 'budget_welfare', 'budget_security'
+            'budget_education', 'budget_health', 'budget_infrastructure', 'budget_welfare', 'budget_security',
+            'min_wage', 'export_tariff'
         ]
         return dict(zip(columns, row))
     return None
@@ -360,8 +515,9 @@ def save_turn_state(game_id, data, db_path=DB_PATH):
         game_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
         employment_rate, crime_rate, happiness, education_index, health_index, infrastructure, opposition_strength, corruption_index,
         tax_low, tax_mid, tax_high,
-        budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security,
+        min_wage, export_tariff
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         game_id, data['turn_year'], data['treasury'], data['gdp'],
         data['pop_low'], data['pop_mid'], data['pop_high'], data['pop_elder'],
@@ -369,7 +525,8 @@ def save_turn_state(game_id, data, db_path=DB_PATH):
         data['health_index'], data['infrastructure'], data['opposition_strength'], data['corruption_index'],
         data['tax_low'], data['tax_mid'], data['tax_high'],
         data['budget_education'], data['budget_health'], data['budget_infrastructure'],
-        data['budget_welfare'], data['budget_security']
+        data['budget_welfare'], data['budget_security'],
+        data['min_wage'], data['export_tariff']
     ))
     conn.commit()
     conn.close()
@@ -468,6 +625,21 @@ def get_party_name(game_id, db_path=DB_PATH):
     conn.close()
     return row[0] if row and row[0] else next(iter(PARTY_PRESETS))
 
+def get_sandbox_mode(game_id, db_path=DB_PATH):
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT sandbox_mode FROM games WHERE game_id = ?", (game_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row[0]) if row else False
+
+def set_sandbox_mode(game_id, enabled, db_path=DB_PATH):
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE games SET sandbox_mode = ? WHERE game_id = ?", (1 if enabled else 0, game_id))
+    conn.commit()
+    conn.close()
+
 def apply_bribe(game_id, db_path=DB_PATH):
     """
     Spends $100B from the treasury of the current (not-yet-ended) turn to
@@ -503,3 +675,135 @@ def apply_bribe(game_id, db_path=DB_PATH):
         db_path=db_path
     )
     return {'treasury': new_treasury, 'opposition_strength': new_opposition, 'corruption_index': new_corruption}
+
+def get_cabinet(game_id, db_path=DB_PATH):
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT cabinet_id, position, advisor_name, tier, bonus_value, salary, hired_year
+        FROM cabinet WHERE game_id = ?
+    """, (game_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    columns = ['cabinet_id', 'position', 'advisor_name', 'tier', 'bonus_value', 'salary', 'hired_year']
+    return [dict(zip(columns, r)) for r in rows]
+
+def hire_advisor(game_id, position, tier, db_path=DB_PATH):
+    """
+    Hires (or replaces) the advisor in the given cabinet position, paying the
+    tier's hire_cost immediately from the current turn's treasury. The
+    ongoing salary is deducted every subsequent turn by engine.py.
+    """
+    tier_info = ADVISOR_TIERS[tier]
+    advisor_name = random.choice(ADVISOR_NAME_POOL)
+
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT history_id, turn_year, treasury FROM nation_history
+        WHERE game_id = ? ORDER BY turn_year DESC LIMIT 1
+    """, (game_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    history_id, turn_year, treasury = row
+    new_treasury = treasury - tier_info['hire_cost']
+
+    cursor.execute("DELETE FROM cabinet WHERE game_id = ? AND position = ?", (game_id, position))
+    cursor.execute("""
+        INSERT INTO cabinet (game_id, position, advisor_name, tier, bonus_value, salary, hired_year)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (game_id, position, advisor_name, tier, tier_info['bonus'], tier_info['salary'], turn_year))
+    cursor.execute("UPDATE nation_history SET treasury = ? WHERE history_id = ?", (new_treasury, history_id))
+    conn.commit()
+    conn.close()
+
+    log_event(
+        game_id, turn_year, 'SOCIAL', f"Menteri Baru: {position}",
+        f"{advisor_name} ({tier}) dilantik sebagai {position}, menghabiskan ${tier_info['hire_cost']:.1f}B dari kas negara untuk biaya pelantikan.",
+        db_path=db_path
+    )
+    return {'advisor_name': advisor_name, 'treasury': new_treasury}
+
+def fire_advisor(game_id, position, db_path=DB_PATH):
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM cabinet WHERE game_id = ? AND position = ?", (game_id, position))
+    conn.commit()
+    conn.close()
+
+def create_pending_event(game_id, event_key, turn_year, db_path=DB_PATH):
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO pending_events (game_id, event_key, turn_year) VALUES (?, ?, ?)",
+        (game_id, event_key, turn_year)
+    )
+    conn.commit()
+    conn.close()
+
+def get_pending_event(game_id, db_path=DB_PATH):
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT pending_id, event_key, turn_year FROM pending_events WHERE game_id = ? ORDER BY pending_id DESC LIMIT 1",
+        (game_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {'pending_id': row[0], 'event_key': row[1], 'turn_year': row[2]}
+    return None
+
+def resolve_pending_event(game_id, event_key, choice_label, db_path=DB_PATH):
+    """
+    Applies the chosen option's stat deltas to the current (not-yet-ended)
+    turn's row in place - same pattern as apply_bribe/hire_advisor - then
+    clears the pending decision so gameplay can continue.
+    """
+    effects = RANDOM_EVENTS[event_key]['choices'][choice_label]
+
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT history_id, turn_year, treasury, gdp, happiness, opposition_strength,
+               corruption_index, infrastructure, health_index, education_index
+        FROM nation_history WHERE game_id = ? ORDER BY turn_year DESC LIMIT 1
+    """, (game_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+
+    (history_id, turn_year, treasury, gdp, happiness, opposition_strength,
+     corruption_index, infrastructure, health_index, education_index) = row
+
+    new_treasury = treasury + effects.get('treasury', 0.0)
+    new_gdp = max(10.0, gdp + effects.get('gdp', 0.0))
+    new_happiness = max(0.0, min(100.0, happiness + effects.get('happiness', 0.0)))
+    new_opposition = max(0.0, min(100.0, opposition_strength + effects.get('opposition_strength', 0.0)))
+    new_corruption = max(0.0, min(100.0, corruption_index + effects.get('corruption_index', 0.0)))
+    new_infrastructure = max(0.0, min(100.0, infrastructure + effects.get('infrastructure', 0.0)))
+    new_health = max(0.0, min(100.0, health_index + effects.get('health_index', 0.0)))
+    new_education = max(0.0, min(100.0, education_index + effects.get('education_index', 0.0)))
+
+    cursor.execute("""
+        UPDATE nation_history
+        SET treasury = ?, gdp = ?, happiness = ?, opposition_strength = ?,
+            corruption_index = ?, infrastructure = ?, health_index = ?, education_index = ?
+        WHERE history_id = ?
+    """, (new_treasury, new_gdp, new_happiness, new_opposition, new_corruption,
+          new_infrastructure, new_health, new_education, history_id))
+
+    cursor.execute("DELETE FROM pending_events WHERE game_id = ?", (game_id,))
+    conn.commit()
+    conn.close()
+
+    event = RANDOM_EVENTS[event_key]
+    log_event(
+        game_id, turn_year, 'SOCIAL', f"Keputusan: {event['title']}",
+        f"Anda memilih '{choice_label}'. {event['description']}",
+        db_path=db_path
+    )
+    return {'treasury': new_treasury, 'happiness': new_happiness}
