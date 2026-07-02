@@ -5,3 +5,4 @@ ledger.db
 .claude/
 *.log
 desktop.ini
+.streamlit/secrets.toml

@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import ledger_db as database
 import engine
+import leaderboard
 from i18n import t
 
 # Page configuration
@@ -70,6 +71,7 @@ def show_start_screen(lang):
 
     col1, col2 = st.columns(2)
     with col1:
+        username = st.text_input(t(lang, "label_username"), value=st.session_state.get("username", ""), max_chars=30)
         nation_name = st.text_input(t(lang, "label_regime_name"), value="Regime I", max_chars=30)
         country_name = st.selectbox(t(lang, "label_select_country"), ["Indonesia", "Singapore", "United States", "Japan", "Germany"])
         difficulty = st.selectbox(t(lang, "label_difficulty"), ["Easy", "Medium", "Hard"])
@@ -109,9 +111,32 @@ def show_start_screen(lang):
 
     if st.button(t(lang, "begin_button"), type="primary"):
         # Create a new game in DB and store id in session
+        st.session_state.username = username
         game_id = database.create_new_game(nation_name, country_name, difficulty, party_name)
         st.session_state.game_id = game_id
         st.rerun()
+
+    st.divider()
+    st.subheader(t(lang, "leaderboard_header"))
+    try:
+        top_entries = leaderboard.get_top(10)
+        if top_entries.empty:
+            st.caption(t(lang, "leaderboard_empty"))
+        else:
+            display_df = top_entries.rename(columns={
+                'username': t(lang, "leaderboard_col_username"),
+                'nation_name': t(lang, "leaderboard_col_nation"),
+                'country': t(lang, "leaderboard_col_country"),
+                'difficulty': t(lang, "leaderboard_col_difficulty"),
+                'grade': t(lang, "leaderboard_col_grade"),
+                'score': t(lang, "leaderboard_col_score"),
+            })
+            cols_to_show = [t(lang, "leaderboard_col_username"), t(lang, "leaderboard_col_nation"),
+                             t(lang, "leaderboard_col_country"), t(lang, "leaderboard_col_difficulty"),
+                             t(lang, "leaderboard_col_grade"), t(lang, "leaderboard_col_score")]
+            st.dataframe(display_df[cols_to_show], hide_index=True, width='stretch')
+    except Exception:
+        st.caption(t(lang, "leaderboard_unavailable"))
 
 # Desaturated/lightened semantic palette (Tailwind's "-400" shades) - chosen
 # over pure red/amber/green because fully saturated colors vibrate/glare on
@@ -136,12 +161,12 @@ def render_status_bar(label_text, value_pct, tier):
     </div>
     """, unsafe_allow_html=True)
 
-def render_event_entry(ev, show_year=True):
-    year = ev['turn_year']
+def render_event_entry(ev, lang, show_year=True, crisis_requirements=None):
+    cal_year, cal_quarter = database.get_calendar_label(ev['turn_year'])
     title = ev['title']
     desc = ev['description']
     ev_type = ev['event_type']
-    prefix = f"[{year}] " if show_year else ""
+    prefix = f"[{cal_year} Q{cal_quarter}] " if show_year else ""
 
     if ev_type == 'CRISIS':
         st.error(f"**⚠️ {prefix}{title}** — {desc}")
@@ -152,6 +177,10 @@ def render_event_entry(ev, show_year=True):
     else:
         st.write(f"**ℹ️ {prefix}{title}** — {desc}")
 
+    advice = database.get_event_advice(ev, crisis_requirements)
+    if advice:
+        st.caption(f"{t(lang, 'event_advice_prefix')}: {advice}")
+
 def show_dashboard(game_id, lang):
     # 1. Fetch current game state
     latest_state = database.get_latest_turn(game_id)
@@ -161,6 +190,7 @@ def show_dashboard(game_id, lang):
         st.rerun()
 
     country_name = database.get_country_name(game_id)
+    current_cal_year, current_cal_quarter = database.get_calendar_label(latest_state['turn_year'])
 
     def fmt_money(amount, decimals=1, signed=False):
         s = database.format_currency(amount, country_name, decimals=decimals)
@@ -175,6 +205,11 @@ def show_dashboard(game_id, lang):
         'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'opposition_strength', 'corruption_index', 'crime_rate',
         'happiness_low', 'happiness_mid', 'happiness_high', 'happiness_elder'
     ])
+    # Each row is now a quarter, not a year - charts use this readable
+    # "2026 Q1" label as the x-axis instead of the raw turn index.
+    df_history['period_label'] = df_history['turn_year'].apply(
+        lambda t: "{} Q{}".format(*database.get_calendar_label(t))
+    )
 
     p_low = latest_state['pop_low']
     p_mid = latest_state['pop_mid']
@@ -191,36 +226,40 @@ def show_dashboard(game_id, lang):
         is_game_over = True
         game_over_reason = "bankruptcy"
 
-    # Condition B: Coup / Revolution (Happiness drops below 20% two years in a row)
-    if len(df_history) >= 2:
-        last_two_happiness = df_history['happiness'].iloc[-2:].values
-        if all(h < 20.0 for h in last_two_happiness):
+    # Condition B: Coup / Revolution (Happiness drops below 20% for 8
+    # straight quarters = 2 years, same real-time bar as when a turn was a
+    # full year)
+    if len(df_history) >= 8:
+        last_two_years_happiness = df_history['happiness'].iloc[-8:].values
+        if all(h < 20.0 for h in last_two_years_happiness):
             is_game_over = True
             game_over_reason = "coup"
 
-    # Condition C: Vote of No Confidence (Opposition Strength >= 85% two years in a row)
-    if len(df_history) >= 2:
-        last_two_opposition = df_history['opposition_strength'].iloc[-2:].values
-        if all(o >= 85.0 for o in last_two_opposition):
+    # Condition C: Vote of No Confidence (Opposition Strength >= 85% for 8
+    # straight quarters = 2 years)
+    if len(df_history) >= 8:
+        last_two_years_opposition = df_history['opposition_strength'].iloc[-8:].values
+        if all(o >= 85.0 for o in last_two_years_opposition):
             is_game_over = True
             game_over_reason = "no_confidence"
 
-    # Condition D: Election Defeat (every 5 years, Approval Rating below the
-    # difficulty's narrow-win threshold)
+    # Condition D: Election Defeat (every 20 turns / 5 years, Approval Rating
+    # below the difficulty's narrow-win threshold). turn_year is a 0-based
+    # turn index, so no calendar offset is needed.
     diff_settings = database.get_difficulty_settings(game_id)
     debt_to_gdp_pct = (latest_state['treasury'] / latest_state['gdp']) * 100.0
     rating_info = database.get_credit_rating(debt_to_gdp_pct, latest_state['corruption_index'])
-    years_since_start = latest_state['turn_year'] - 2026
-    if years_since_start > 0 and years_since_start % 5 == 0:
+    quarters_since_start = latest_state['turn_year']
+    if quarters_since_start > 0 and quarters_since_start % engine.ELECTION_TERM_QUARTERS == 0:
         approval_rating = 0.6 * latest_state['happiness'] + 0.4 * (100.0 - latest_state['opposition_strength'])
         if approval_rating < diff_settings["election_narrow_threshold"]:
             is_game_over = True
             game_over_reason = "voted_out"
 
-    # Condition E: Completed 50 Years (starting 2026, so 2076 is Turn 50) -
-    # skipped once the player has opted into Sandbox Mode (unlimited years)
+    # Condition E: Completed 50 Years (200 quarterly turns) - skipped once
+    # the player has opted into Sandbox Mode (unlimited turns)
     sandbox_mode = database.get_sandbox_mode(game_id)
-    if latest_state['turn_year'] >= 2076 and not sandbox_mode:
+    if latest_state['turn_year'] >= database.TOTAL_GAME_TURNS and not sandbox_mode:
         is_game_over = True
         game_over_reason = "victory"
 
@@ -231,17 +270,20 @@ def show_dashboard(game_id, lang):
     # 3. Sidebar Inputs (Policy Control)
     st.sidebar.subheader(t(lang, "sidebar_cabinet_actions"))
     st.sidebar.write(t(lang, "sidebar_country", country=country_name))
-    st.sidebar.write(t(lang, "sidebar_simulated_years", years=df_history['turn_year'].count() - 1))
+    quarters_played = df_history['turn_year'].count() - 1
+    st.sidebar.write(t(lang, "sidebar_simulated_years", quarters=quarters_played, years=quarters_played / 4.0))
 
-    # Election countdown - term is 5 years for every difficulty
-    years_since_start = latest_state['turn_year'] - 2026
-    remainder = years_since_start % 5
-    years_to_election = 5 - remainder if remainder != 0 else 5
-    st.sidebar.info(t(lang, "election_countdown", years=years_to_election, year=latest_state['turn_year'] + years_to_election))
+    # Election countdown - term is 20 quarters (5 years) for every difficulty
+    quarters_since_start = latest_state['turn_year']
+    remainder = quarters_since_start % engine.ELECTION_TERM_QUARTERS
+    quarters_to_election = engine.ELECTION_TERM_QUARTERS - remainder if remainder != 0 else engine.ELECTION_TERM_QUARTERS
+    election_year, election_quarter = database.get_calendar_label(latest_state['turn_year'] + quarters_to_election)
+    st.sidebar.info(t(lang, "election_countdown", quarters=quarters_to_election, year=election_year, quarter=election_quarter))
 
     # Fetch active crisis list to display warnings in Sidebar and Main Page
     crises = database.get_crises(game_id)
     active_crisis = next((c for c in crises if c['status'] == 'ACTIVE'), None)
+    crisis_requirements = {c['name']: c['requirement_desc'] for c in crises}
 
     pending_event = database.get_pending_event(game_id)
     if pending_event:
@@ -262,14 +304,15 @@ def show_dashboard(game_id, lang):
 
     if pending_review_year:
         review_events = database.get_events(game_id, turn_year=pending_review_year)
+        review_cal_year, review_cal_quarter = database.get_calendar_label(pending_review_year)
 
-        @st.dialog(t(lang, "year_review_title", year=pending_review_year), dismissible=False)
+        @st.dialog(t(lang, "year_review_title", year=review_cal_year, quarter=review_cal_quarter), dismissible=False)
         def _year_review_dialog():
             if not review_events:
                 st.write(t(lang, "no_events_message"))
             else:
                 for ev in review_events:
-                    render_event_entry(ev, show_year=False)
+                    render_event_entry(ev, lang, show_year=False, crisis_requirements=crisis_requirements)
             st.divider()
             if st.button(t(lang, "continue_button"), type="primary", width="stretch", key="year_review_continue"):
                 del st.session_state[review_year_key]
@@ -283,11 +326,19 @@ def show_dashboard(game_id, lang):
             dialog_title = f"Saran Menteri: {data['position']}"
             event_description = f"{data['advisor_name']} ({data['tier']}) menyarankan: \"{data['advice_text']}\" (Biaya implementasi: {fmt_money(data['cost'])})"
             choice_labels = ["Terima Saran", "Abaikan Saran"]
+            field_meta = database.EFFECT_FIELD_META.get(data['target_field'], {})
+            potential_val = data['effect_magnitude'] * field_meta.get('scale', 1)
+            potential_text = f"{field_meta.get('icon', '')} {field_meta.get('label', data['target_field'])} {'+' if potential_val >= 0 else ''}{potential_val:.1f}{field_meta.get('unit', '')}"
+            choice_captions = [
+                t(lang, "minister_advice_accept_caption", potential=potential_text, cost=fmt_money(data['cost']), tier=data['tier']),
+                t(lang, "minister_advice_ignore_caption"),
+            ]
         else:
             event = database.RANDOM_EVENTS[pending_event['event_key']]
             dialog_title = event['title']
             event_description = event['description']
             choice_labels = list(event['choices'].keys())
+            choice_captions = [database.format_effects_summary(event['choices'][label], country_name) for label in choice_labels]
 
         @st.dialog(t(lang, "pending_event_header", title=dialog_title), dismissible=False)
         def _pending_event_dialog():
@@ -298,6 +349,8 @@ def show_dashboard(game_id, lang):
                     if st.button(choice_label, key=f"event_choice_{i}", type="primary", width="stretch"):
                         database.resolve_pending_event(game_id, pending_event['event_key'], choice_label)
                         st.rerun()
+                    if choice_captions[i]:
+                        st.caption(choice_captions[i])
 
         _pending_event_dialog()
 
@@ -337,9 +390,10 @@ def show_dashboard(game_id, lang):
 
         currency_unit = database.currency_unit_suffix(country_name)
         st.write(f"{t(lang, 'spending_header')} ({currency_unit})")
-        # Range is 0 to GDP/2 for each allocation - shown/entered in local
-        # currency, converted back to USD billions before reaching the engine.
-        max_budget = float(latest_state['gdp'] / 2.0)
+        # Range is 0 to GDP/8 for each allocation (a quarterly budget capped
+        # at 50% of ANNUAL GDP if maxed out every quarter) - shown/entered in
+        # local currency, converted back to USD billions before reaching the engine.
+        max_budget = float(latest_state['gdp'] / 8.0)
         max_budget_local = database.to_local(max_budget, country_name)
         budget_step = max(0.01, database.to_local(0.1, country_name))
 
@@ -408,7 +462,10 @@ def show_dashboard(game_id, lang):
 
         if form_locked:
             st.warning(t(lang, "pending_event_form_warning"))
-        submit_btn = st.form_submit_button(t(lang, "end_fiscal_year_button", year=latest_state['turn_year']), disabled=form_locked)
+        submit_btn = st.form_submit_button(
+            t(lang, "end_fiscal_year_button", year=current_cal_year, quarter=current_cal_quarter),
+            disabled=form_locked
+        )
 
         if submit_btn and not form_locked:
             inputs = {
@@ -519,6 +576,7 @@ def show_dashboard(game_id, lang):
             if st.button(t(lang, "revise_budget_button"), key="budget_crisis_revise", width="stretch"):
                 del st.session_state[f'budget_crisis_{game_id}']
                 st.rerun()
+            st.caption(t(lang, "revise_budget_caption"))
         with col_bc2:
             if st.button(t(lang, "force_decree_button"), key="budget_crisis_force", type="primary", width="stretch"):
                 new_state = engine.simulate_turn(game_id, budget_crisis['inputs'])
@@ -526,9 +584,10 @@ def show_dashboard(game_id, lang):
                 st.session_state[f'year_review_{game_id}'] = new_state['turn_year']
                 del st.session_state[f'budget_crisis_{game_id}']
                 st.rerun()
+            st.caption(t(lang, "force_decree_caption"))
         st.divider()
 
-    st.subheader(t(lang, "year_header", country=country_name, year=latest_state['turn_year']))
+    st.subheader(t(lang, "year_header", country=country_name, year=current_cal_year, quarter=current_cal_quarter))
     if sandbox_mode:
         st.caption(t(lang, "sandbox_caption"))
 
@@ -648,7 +707,7 @@ def show_dashboard(game_id, lang):
             st.progress(progress_val, text=t(lang, "crisis_progress_text", current=active_crisis['current_progress'], target=active_crisis['target_progress']))
 
             turns_left = active_crisis['duration_turns'] - (latest_state['turn_year'] - active_crisis['start_year'] + 1)
-            st.write(t(lang, "crisis_years_remaining", years=max(0, turns_left)))
+            st.write(t(lang, "crisis_years_remaining", quarters=max(0, turns_left)))
 
     # Row 3: Sub-indices and Charts tabs
     tab_names = t(lang, "tab_names")
@@ -660,8 +719,8 @@ def show_dashboard(game_id, lang):
         gdp_local_series = database.to_local(df_history['gdp'], country_name)
         treasury_local_series = database.to_local(df_history['treasury'], country_name)
         fig_econ = go.Figure()
-        fig_econ.add_trace(go.Scatter(x=df_history['turn_year'], y=gdp_local_series, mode='lines+markers', name=f"GDP ({currency_unit})", line=dict(color='#00FFCC')))
-        fig_econ.add_trace(go.Scatter(x=df_history['turn_year'], y=treasury_local_series, mode='lines+markers', name=f"Treasury ({currency_unit})", line=dict(color='#FF5E5B')))
+        fig_econ.add_trace(go.Scatter(x=df_history['period_label'], y=gdp_local_series, mode='lines+markers', name=f"GDP ({currency_unit})", line=dict(color='#00FFCC')))
+        fig_econ.add_trace(go.Scatter(x=df_history['period_label'], y=treasury_local_series, mode='lines+markers', name=f"Treasury ({currency_unit})", line=dict(color='#FF5E5B')))
         fig_econ.update_layout(title=t(lang, "tab1_chart_title"), template="plotly_dark", hovermode="x unified")
         st.plotly_chart(fig_econ, width='stretch')
 
@@ -680,10 +739,10 @@ def show_dashboard(game_id, lang):
                       help=t(lang, "infra_index_help"))
 
         fig_indices = go.Figure()
-        fig_indices.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['education_index'], mode='lines+markers', name='Education', line=dict(dash='dash', color='#FFD166')))
-        fig_indices.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['health_index'], mode='lines+markers', name='Healthcare', line=dict(dash='dash', color='#06D6A0')))
-        fig_indices.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['infrastructure'], mode='lines+markers', name='Infrastructure', line=dict(dash='dash', color='#118AB2')))
-        fig_indices.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['happiness'], mode='lines+markers', name='Happiness (%)', line=dict(width=3, color='#EF476F')))
+        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['education_index'], mode='lines+markers', name='Education', line=dict(dash='dash', color='#FFD166')))
+        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['health_index'], mode='lines+markers', name='Healthcare', line=dict(dash='dash', color='#06D6A0')))
+        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['infrastructure'], mode='lines+markers', name='Infrastructure', line=dict(dash='dash', color='#118AB2')))
+        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness'], mode='lines+markers', name='Happiness (%)', line=dict(width=3, color='#EF476F')))
         fig_indices.update_layout(title=t(lang, "tab2_chart_title"), template="plotly_dark")
         st.plotly_chart(fig_indices, width='stretch')
 
@@ -735,18 +794,18 @@ def show_dashboard(game_id, lang):
 
             # Show historical mobility chart
             fig_mobility = go.Figure()
-            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_low'], mode='lines+markers', name=t(lang, "label_low_income"), stackgroup='one', line=dict(color='#FF9F1C')))
-            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_mid'], mode='lines+markers', name=t(lang, "label_mid_income"), stackgroup='one', line=dict(color='#FFD166')))
-            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_high'], mode='lines+markers', name=t(lang, "label_high_income"), stackgroup='one', line=dict(color='#06D6A0')))
-            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_elder'], mode='lines+markers', name=t(lang, "label_pensioners"), stackgroup='one', line=dict(color='#118AB2')))
+            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_low'], mode='lines+markers', name=t(lang, "label_low_income"), stackgroup='one', line=dict(color='#FF9F1C')))
+            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_mid'], mode='lines+markers', name=t(lang, "label_mid_income"), stackgroup='one', line=dict(color='#FFD166')))
+            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_high'], mode='lines+markers', name=t(lang, "label_high_income"), stackgroup='one', line=dict(color='#06D6A0')))
+            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_elder'], mode='lines+markers', name=t(lang, "label_pensioners"), stackgroup='one', line=dict(color='#118AB2')))
             fig_mobility.update_layout(title=t(lang, "mobility_chart_title"), template="plotly_dark")
             st.plotly_chart(fig_mobility, width='stretch')
 
         fig_class_happiness = go.Figure()
-        fig_class_happiness.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['happiness_low'], mode='lines+markers', name=t(lang, "label_low_income"), line=dict(color='#FF9F1C')))
-        fig_class_happiness.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['happiness_mid'], mode='lines+markers', name=t(lang, "label_mid_income"), line=dict(color='#FFD166')))
-        fig_class_happiness.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['happiness_high'], mode='lines+markers', name=t(lang, "label_high_income"), line=dict(color='#06D6A0')))
-        fig_class_happiness.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['happiness_elder'], mode='lines+markers', name=t(lang, "label_pensioners"), line=dict(color='#118AB2')))
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_low'], mode='lines+markers', name=t(lang, "label_low_income"), line=dict(color='#FF9F1C')))
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_mid'], mode='lines+markers', name=t(lang, "label_mid_income"), line=dict(color='#FFD166')))
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_high'], mode='lines+markers', name=t(lang, "label_high_income"), line=dict(color='#06D6A0')))
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_elder'], mode='lines+markers', name=t(lang, "label_pensioners"), line=dict(color='#118AB2')))
         fig_class_happiness.update_layout(title=t(lang, "class_happiness_chart_title"), template="plotly_dark")
         st.plotly_chart(fig_class_happiness, width='stretch')
 
@@ -758,7 +817,7 @@ def show_dashboard(game_id, lang):
             st.write(t(lang, "no_events_message"))
         else:
             for ev in events:
-                render_event_entry(ev, show_year=True)
+                render_event_entry(ev, lang, show_year=True, crisis_requirements=crisis_requirements)
 
     with tab5:
         st.subheader(t(lang, "tab5_subheader"))
@@ -855,6 +914,30 @@ def show_game_over_screen(latest_state, df_history, reason, country_name, game_i
     {t(lang, "grade_header", grade=grade)}
     *{comment}*
     """)
+
+    # Record this finished administration to the shared online leaderboard,
+    # once per game_id - show_game_over_screen re-renders on every rerun
+    # while parked on this screen, so without this guard every button click
+    # here would append a duplicate row.
+    recorded_key = f'leaderboard_recorded_{game_id}'
+    if not st.session_state.get(recorded_key, False):
+        try:
+            leaderboard.record_entry(
+                username=st.session_state.get("username", ""),
+                nation_name=database.get_nation_name(game_id),
+                country=country_name,
+                party=database.get_party_name(game_id),
+                difficulty=database.get_difficulty(game_id),
+                final_gdp=latest_state['gdp'],
+                final_happiness=latest_state['happiness'],
+                final_education=latest_state['education_index'],
+                grade=grade,
+                score=score,
+            )
+            st.session_state[recorded_key] = True
+            st.caption(t(lang, "leaderboard_recorded_caption"))
+        except Exception:
+            st.caption(t(lang, "leaderboard_record_failed_caption"))
 
     # Offer retry - victory also offers an unlimited Sandbox continuation
     if reason == "victory":

@@ -17,6 +17,20 @@ CURRENCY_INFO = {
     "Germany": {"symbol": "€", "rate_per_usd": 0.92, "unit_divisor": 1, "unit_label": "B"},
 }
 
+# Turns are quarterly (3 months each, 4 per calendar year) - turn_year is
+# stored as a 0-based turn INDEX (not a literal calendar year) so every
+# internal comparison (elections, crises, victory) stays simple integer
+# arithmetic. get_calendar_label() derives the player-facing "2026 Q1" style
+# label from that index.
+GAME_START_YEAR = 2026
+QUARTERS_PER_YEAR = 4
+TOTAL_GAME_TURNS = 200  # 50 years x 4 quarters
+
+def get_calendar_label(turn_index):
+    year = GAME_START_YEAR + turn_index // QUARTERS_PER_YEAR
+    quarter = (turn_index % QUARTERS_PER_YEAR) + 1
+    return year, quarter
+
 def format_currency(usd_billions, country_name, decimals=1):
     info = CURRENCY_INFO.get(country_name, CURRENCY_INFO["United States"])
     local_value = usd_billions * info["rate_per_usd"] / info["unit_divisor"]
@@ -127,10 +141,13 @@ def get_opposition_party(party_name):
 # but give a bigger bonus to the position's linked stat in engine.py.
 CABINET_POSITIONS = ["Menteri Pendidikan", "Menteri Kesehatan", "Menteri Infrastruktur", "Menteri Sosial", "Menteri Keamanan"]
 
+# bonus and salary are applied every turn, so both are quartered from their
+# original per-year magnitude now that a turn is a quarter, not a year;
+# hire_cost is a one-time cost and stays as-is.
 ADVISOR_TIERS = {
-    "Muda": {"bonus": 2.0, "hire_cost": 5.0, "salary": 1.0},
-    "Berpengalaman": {"bonus": 4.0, "hire_cost": 15.0, "salary": 3.0},
-    "Pakar": {"bonus": 7.0, "hire_cost": 35.0, "salary": 6.0},
+    "Muda": {"bonus": 0.5, "hire_cost": 5.0, "salary": 0.25},
+    "Berpengalaman": {"bonus": 1.0, "hire_cost": 15.0, "salary": 0.75},
+    "Pakar": {"bonus": 1.75, "hire_cost": 35.0, "salary": 1.5},
 }
 
 # Odds that a hired advisor's unsolicited policy advice actually targets the
@@ -177,11 +194,15 @@ MINISTER_ADVICE_COST = 20.0
 # (Hard behaved identically to Medium), which is why players reported Hard
 # being easy to beat. These settings are read every turn from engine.py and
 # at game/hire time from ledger_db.py to make each tier mechanically distinct.
+# interest_rate_* are quartered from their original per-year figure since
+# debt interest is now charged every quarter instead of once a year;
+# crisis_duration_delta is in quarters now (x4 its old per-year value) so an
+# "extra year" of grace on Easy still means an extra year, not an extra turn.
 DIFFICULTY_SETTINGS = {
     "Easy": {
-        "interest_rate_normal": 0.04,
-        "interest_rate_crisis": 0.07,
-        "crisis_duration_delta": 1,
+        "interest_rate_normal": 0.01,
+        "interest_rate_crisis": 0.0175,
+        "crisis_duration_delta": 4,
         "decay_modifier": 0.7,
         "shock_severity_mult": 0.7,
         "starting_funds_mult": 1.10,
@@ -192,8 +213,8 @@ DIFFICULTY_SETTINGS = {
         "deficit_ceiling_pct": 5.0,
     },
     "Medium": {
-        "interest_rate_normal": 0.06,
-        "interest_rate_crisis": 0.09,
+        "interest_rate_normal": 0.015,
+        "interest_rate_crisis": 0.0225,
         "crisis_duration_delta": 0,
         "decay_modifier": 1.0,
         "shock_severity_mult": 1.0,
@@ -205,9 +226,9 @@ DIFFICULTY_SETTINGS = {
         "deficit_ceiling_pct": 3.0,
     },
     "Hard": {
-        "interest_rate_normal": 0.09,
-        "interest_rate_crisis": 0.13,
-        "crisis_duration_delta": -1,
+        "interest_rate_normal": 0.0225,
+        "interest_rate_crisis": 0.0325,
+        "crisis_duration_delta": -4,
         "decay_modifier": 1.3,
         "shock_severity_mult": 1.3,
         "starting_funds_mult": 0.90,
@@ -353,6 +374,97 @@ RANDOM_EVENTS = {
         },
     },
 }
+
+# Static "what to fix" tips shown under News Feed / Year Review entries.
+# Keyed by the exact (mostly-static) event title strings logged throughout
+# engine.py/ledger_db.py. Crisis lifecycle events are matched by prefix
+# instead, since their titles are dynamic ("CRISIS START: <name>") - the
+# advice there just reuses that crisis's own requirement_desc, already
+# phrased as "what to change" to solve it.
+EVENT_ADVICE_MAP = {
+    "Debt Accumulation": "Naikkan salah satu bracket pajak atau kurangi belanja diskresi untuk menekan defisit sebelum bunga utang membengkak.",
+    "Widespread Protests": "Naikkan Anggaran Kesejahteraan Sosial atau turunkan Pajak Kelas Rendah untuk memulihkan happiness.",
+    "Korupsi Merajalela": "Hentikan aksi Suap Politisi - Indeks Korupsi hanya meluruh dengan sendirinya jika tidak terus ditambah.",
+    "Momentum Oposisi Meningkat": "Sesuaikan kebijakan agar lebih dekat dengan ideologi partai Anda sendiri, atau redakan lewat Negosiasi Dukungan Koalisi.",
+    "Oposisi di Ambang Kekuatan Penuh": "Segera redakan Kekuatan Oposisi lewat Suap Politisi atau Negosiasi Dukungan Koalisi sebelum memicu Mosi Tidak Percaya.",
+    "Pemilu: Menang Tipis": "Naikkan happiness atau tekan Kekuatan Oposisi sebelum periode pemilu 5 tahun berikutnya.",
+    "Brain Drain Warning": "Turunkan Pajak Kelas Atas di bawah 40% untuk menghentikan emigrasi kelompok kaya.",
+    "Talent Exodus": "Turunkan Pajak Kelas Atas dan naikkan Anggaran Kesejahteraan Sosial untuk meredam krisis Brain Drain.",
+    "Krisis Pendidikan Akut": "Naikkan Anggaran Pendidikan untuk memulihkan Education Index.",
+    "Sistem Kesehatan Kolaps": "Naikkan Anggaran Kesehatan untuk memulihkan Healthcare Index.",
+    "Pengangguran Massal": "Turunkan Upah Minimum atau naikkan Anggaran Infrastruktur untuk mendorong penyerapan tenaga kerja.",
+    "Kriminalitas Meningkat": "Naikkan Anggaran Keamanan & Pertahanan untuk menekan tingkat kriminalitas.",
+    "APBN Dipaksakan lewat Dekrit": "Revisi anggaran agar sesuai batas defisit legal, atau redakan Kekuatan Oposisi lebih dulu lewat Negosiasi Koalisi agar tidak perlu memaksakan lewat dekrit lagi.",
+    "EVENT: Global Recession": "Pertimbangkan menahan belanja diskresi atau perkuat Perjanjian Dagang untuk meredam dampak resesi global.",
+    "EVENT: Cyber Ransom Attack": "Naikkan Anggaran Keamanan atau Infrastruktur untuk memperkuat pertahanan digital negara.",
+    "EVENT: Bencana Alam": "Naikkan Anggaran Infrastruktur untuk mempercepat pemulihan pasca-bencana.",
+}
+
+def get_event_advice(ev, crisis_requirements=None):
+    """
+    Returns a short actionable "what to fix" tip for a logged event, or None
+    if the event is purely positive/informational and has nothing to fix.
+    crisis_requirements: optional {crisis_name: requirement_desc} dict (e.g.
+    built from get_crises()) so crisis-lifecycle events can surface that
+    crisis's own win condition as the concrete fix.
+    """
+    title = ev['title']
+    crisis_requirements = crisis_requirements or {}
+
+    for prefix in ("CRISIS START:", "Crisis Alert:", "CRISIS FAILED:"):
+        if title.startswith(prefix):
+            crisis_name = title.split(":", 1)[1].strip()
+            return crisis_requirements.get(
+                crisis_name,
+                "Sesuaikan alokasi anggaran agar memenuhi syarat penyelesaian krisis ini."
+            )
+
+    # Progress met / crisis solved / positive shocks - nothing to fix
+    if title.startswith("Crisis Progress:") or title.startswith("CRISIS SOLVED:"):
+        return None
+    if title in ("EVENT: Resource Market Boom", "EVENT: AI Core Breakthrough", "EVENT: Investasi Asing Mengalir"):
+        return None
+
+    return EVENT_ADVICE_MAP.get(title)
+
+# Field metadata used to turn a raw effects dict (as stored in RANDOM_EVENTS
+# choices / minister advice) into a human-readable consequence summary, so a
+# pending decision shows player what's actually at stake instead of a blind
+# choice between two labels.
+EFFECT_FIELD_META = {
+    'treasury': {'icon': '💰', 'label': 'Treasury', 'is_currency': True},
+    'gdp': {'icon': '📈', 'label': 'GDP', 'is_currency': True},
+    'happiness': {'icon': '😊', 'label': 'Happiness', 'unit': '%'},
+    'opposition_strength': {'icon': '🎗️', 'label': 'Oposisi', 'unit': '%'},
+    'corruption_index': {'icon': '🕵️', 'label': 'Korupsi', 'unit': '%'},
+    'infrastructure': {'icon': '🏗️', 'label': 'Infrastruktur', 'unit': '%'},
+    'health_index': {'icon': '🏥', 'label': 'Kesehatan', 'unit': '%'},
+    'education_index': {'icon': '🎓', 'label': 'Pendidikan', 'unit': '%'},
+    'crime_rate': {'icon': '🚔', 'label': 'Kriminalitas', 'unit': '%', 'scale': 100},
+    'foreign_relations': {'icon': '🌐', 'label': 'Hubungan LN', 'unit': '%'},
+}
+
+def format_effects_summary(effects, country_name):
+    """Turns {'treasury': 150.0, 'happiness': -15.0} into a one-line
+    '💰 Treasury +Rp2,370.0T · 😊 Happiness -15.0%' consequence summary, or
+    None if there are no nonzero effects to show."""
+    parts = []
+    for field, delta in effects.items():
+        if not delta:
+            continue
+        meta = EFFECT_FIELD_META.get(field)
+        if not meta:
+            continue
+        if meta.get('is_currency'):
+            text = format_currency(delta, country_name, decimals=1)
+            if delta >= 0:
+                text = f"+{text}"
+            parts.append(f"{meta['icon']} {meta['label']} {text}")
+        else:
+            val = delta * meta.get('scale', 1)
+            sign = '+' if val >= 0 else ''
+            parts.append(f"{meta['icon']} {meta['label']} {sign}{val:.1f}{meta['unit']}")
+    return " · ".join(parts) if parts else None
 
 def get_connection(db_path=DB_PATH):
     return sqlite3.connect(db_path)
@@ -534,7 +646,7 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
 
     # Lookup starting preset
     preset = COUNTRY_PRESETS.get(country_name, COUNTRY_PRESETS["Indonesia"])
-    initial_year = 2026
+    initial_year = 0  # turn index 0 = Year 2026 Q1, see get_calendar_label()
 
     diff_settings = DIFFICULTY_SETTINGS.get(difficulty, DIFFICULTY_SETTINGS["Medium"])
     funds_mult = diff_settings["starting_funds_mult"]
@@ -544,11 +656,14 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
     else:
         treasury = round(preset["treasury"] / funds_mult, 2)  # worse difficulty deepens debt, not shrinks it
 
-    b_ed = round(gdp * 0.02, 2)
-    b_hl = round(gdp * 0.015, 2)
-    b_inf = round(gdp * 0.015, 2)
-    b_welf = round(gdp * 0.01, 2)
-    b_sec = round(gdp * 0.01, 2)
+    # Starting budgets are quarterly amounts (a turn is now a quarter) - the
+    # ratios still target the same annualized ~2%/1.5%/1.5%/1%/1% of GDP
+    # split, just divided across 4 turns a year instead of committed in one.
+    b_ed = round(gdp * 0.005, 2)
+    b_hl = round(gdp * 0.00375, 2)
+    b_inf = round(gdp * 0.00375, 2)
+    b_welf = round(gdp * 0.0025, 2)
+    b_sec = round(gdp * 0.0025, 2)
 
     cursor.execute("""
     INSERT INTO nation_history (
@@ -613,34 +728,38 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
     # one dynamically once its matching economic/social indicator crosses a
     # critical level (see simulate_turn's "Dynamic Crisis Triggering" section),
     # instead of a fixed calendar year. start_year is filled in at that point.
+    # duration_turns/target_progress are x4 their old per-year values (a turn
+    # is now a quarter), and every GDP-ratio threshold quoted in the text is
+    # /4 to match - budget amounts are quarterly now, so a quarterly figure
+    # needs a quarterly-sized bar to still represent "the same annual effort".
     crises_data = [
-        (game_id, "The Infrastructure Bottleneck", 0, 3, 0, 2, 'INACTIVE',
+        (game_id, "The Infrastructure Bottleneck", 0, 12, 0, 8, 'INACTIVE',
          "Rapid industrial growth has overloaded the nation's power grids and road systems.",
-         "Keep Infrastructure budget at or above 1.5% of your total GDP for 2 turns during the crisis duration."),
+         "Keep Infrastructure budget at or above 0.375% of your quarterly GDP for 8 quarters during the crisis duration."),
 
-        (game_id, "The Public Health Epidemic", 0, 4, 0, 3, 'INACTIVE',
+        (game_id, "The Public Health Epidemic", 0, 16, 0, 12, 'INACTIVE',
          "A highly contagious virus is spreading due to public health underfunding.",
-         "Keep Healthcare budget at or above 20% of your total budget AND low-bracket tax rate at or above 8% for 3 turns to build facilities and fund vaccines."),
+         "Keep Healthcare budget at or above 20% of your total budget AND low-bracket tax rate at or above 8% for 12 quarters to build facilities and fund vaccines."),
 
-        (game_id, "The Brain Drain Crisis", 0, 4, 0, 3, 'INACTIVE',
+        (game_id, "The Brain Drain Crisis", 0, 16, 0, 12, 'INACTIVE',
          "Your highly educated citizens are fleeing the nation due to high tax rates on the high-income bracket.",
-         "Reduce Tax Rate on High-Income to below 20% AND keep Social Welfare budget at or above 10% of total spending for 3 turns to retain elite talent."),
+         "Reduce Tax Rate on High-Income to below 20% AND keep Social Welfare budget at or above 10% of total spending for 12 quarters to retain elite talent."),
 
-        (game_id, "The Demographic Cliff", 0, 5, 0, 3, 'INACTIVE',
+        (game_id, "The Demographic Cliff", 0, 20, 0, 12, 'INACTIVE',
          "A record drop in birth rates has caused a severe aging crisis, putting strain on active workers.",
-         "Keep Welfare budget above 3% of your GDP (family subsidies) OR keep combined Security & Infrastructure spending at 15% of total budget (to support high-skill immigration) for 3 turns."),
+         "Keep Welfare budget above 0.75% of your quarterly GDP (family subsidies) OR keep combined Security & Infrastructure spending at 15% of total budget (to support high-skill immigration) for 12 quarters."),
 
-        (game_id, "The Carbon Transition Tariff", 0, 4, 0, 3, 'INACTIVE',
+        (game_id, "The Carbon Transition Tariff", 0, 16, 0, 12, 'INACTIVE',
          "Global partners threat trade sanctions on the country's carbon emissions unless clean production targets are met.",
-         "Keep Infrastructure budget above 2.0% of your GDP (green grid) AND Security budget above 0.5% of your GDP (emissions enforcement) for 3 turns."),
+         "Keep Infrastructure budget above 0.5% of your quarterly GDP (green grid) AND Security budget above 0.125% of your quarterly GDP (emissions enforcement) for 12 quarters."),
 
-        (game_id, "Krisis Utang Nasional", 0, 4, 0, 3, 'INACTIVE',
+        (game_id, "Krisis Utang Nasional", 0, 16, 0, 12, 'INACTIVE',
          "Investor internasional mulai gelisah - rasio utang terhadap GDP negara Anda melewati batas aman, memicu spekulasi soal kemampuan bayar.",
-         "Turunkan total belanja (Pendidikan+Kesehatan+Infrastruktur+Kesejahteraan+Keamanan) ke 8% atau kurang dari GDP selama 3 tahun untuk memulihkan kepercayaan kreditor."),
+         "Turunkan total belanja (Pendidikan+Kesehatan+Infrastruktur+Kesejahteraan+Keamanan) ke 2% atau kurang dari GDP kuartalan selama 12 kuartal untuk memulihkan kepercayaan kreditor."),
 
-        (game_id, "Gelombang Kriminalitas", 0, 4, 0, 3, 'INACTIVE',
+        (game_id, "Gelombang Kriminalitas", 0, 16, 0, 12, 'INACTIVE',
          "Lemahnya penegakan hukum memicu lonjakan kejahatan yang menekan produktivitas dan menakuti investor.",
-         "Pertahankan anggaran Keamanan di atas 2% dari GDP selama 3 tahun untuk memulihkan ketertiban."),
+         "Pertahankan anggaran Keamanan di atas 0.5% dari GDP kuartalan selama 12 kuartal untuk memulihkan ketertiban."),
     ]
 
     # Hard shortens crisis windows, Easy lengthens them - never below
@@ -812,6 +931,14 @@ def update_crisis_state(crisis_id, current_progress, status, start_year=None, db
         """, (current_progress, status, crisis_id))
     conn.commit()
     conn.close()
+
+def get_nation_name(game_id, db_path=DB_PATH):
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT nation_name FROM games WHERE game_id = ?", (game_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else "Regime I"
 
 def get_country_name(game_id, db_path=DB_PATH):
     conn = get_connection(db_path)
