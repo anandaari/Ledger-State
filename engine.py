@@ -110,6 +110,14 @@ def simulate_turn(game_id, inputs):
     cabinet_bonus = {c['position']: c['bonus_value'] for c in cabinet}
     cabinet_salaries = sum(c['salary'] for c in cabinet)
 
+    # 2c. Foreign Relations & Coalition Support - both drift without upkeep.
+    # Foreign Relations mean-reverts toward a neutral 50 (diplomacy fades
+    # without renewal via apply_trade_agreement); Coalition Support decays
+    # outright since minor-party backing must be actively re-bought via
+    # apply_coalition_negotiation.
+    foreign_relations = prev_state['foreign_relations'] * 0.95 + 50.0 * 0.05
+    foreign_relations = max(0.0, min(100.0, foreign_relations))
+    coalition_support = max(0.0, prev_state['coalition_support'] * 0.88)
 
     # 3. Retrieve Crises (crises trigger dynamically once a matching economic
     # indicator crosses a critical level - see "Dynamic Crisis Triggering"
@@ -241,6 +249,11 @@ def simulate_turn(game_id, inputs):
     growth_base -= export_dependency * (export_tariff / 100.0) * 0.05
     growth_base -= import_dependency * (import_tariff / 100.0) * 0.02
 
+    # Foreign Relations: strong diplomatic standing (>50, neutral) gives a
+    # small GDP growth bonus from smoother trade access; collapsed relations
+    # (<50) drag growth down and can eventually trigger the "trade_war" event.
+    growth_base += (foreign_relations - 50.0) / 50.0 * 0.01
+
     if active_crisis and active_crisis['name'] == "The Carbon Transition Tariff":
         growth_base -= 0.04 # Carbon sanctions
 
@@ -329,12 +342,17 @@ def simulate_turn(game_id, inputs):
     import_tariff_revenue = new_gdp * import_dependency * (import_tariff / 100.0) * 0.5
     revenue += import_tariff_revenue
 
-    # Debt Interest - rate depends on difficulty, elevated further during a debt crisis
+    # Debt Interest - rate depends on difficulty and the Sovereign Credit
+    # Rating (derived from last year's Debt/GDP ratio and Corruption), elevated
+    # further during an active debt crisis.
     debt_interest = 0.0
     if prev_state['treasury'] < 0:
+        prev_debt_to_gdp_pct = (prev_state['treasury'] / gdp) * 100.0
+        rating_info = database.get_credit_rating(prev_debt_to_gdp_pct, prev_state['corruption_index'])
         interest_rate = diff_settings["interest_rate_normal"]
         if active_crisis and active_crisis['name'] == "Krisis Utang Nasional":
             interest_rate = diff_settings["interest_rate_crisis"]  # credit downgrade
+        interest_rate *= rating_info['interest_modifier']
         debt_interest = abs(prev_state['treasury']) * interest_rate
 
     total_costs = total_spending + debt_interest + cabinet_salaries
@@ -379,6 +397,14 @@ def simulate_turn(game_id, inputs):
     # Pensioners: highly sensitive to health and welfare
     h_elder = 30.0 + 35.0 * (health_index / 100.0) + 35.0 * min(1.0, welfare_ratio) - 10.0 * crime_factor
     
+    # Clamped copies for storage/display only - the weighted average below
+    # intentionally keeps using the raw (unclamped) values so existing game
+    # balance doesn't shift.
+    h_low_stored = max(0.0, min(100.0, h_low))
+    h_mid_stored = max(0.0, min(100.0, h_mid))
+    h_high_stored = max(0.0, min(100.0, h_high))
+    h_elder_stored = max(0.0, min(100.0, h_elder))
+
     # Weighted average happiness
     new_happiness = r_low * h_low + r_mid * h_mid + r_high * h_high + r_elder * h_elder
     
@@ -671,11 +697,17 @@ def simulate_turn(game_id, inputs):
         'employment_rate': round(new_employment, 3),
         'crime_rate': round(crime_factor, 3),
         'happiness': round(new_happiness, 1),
+        'happiness_low': round(h_low_stored, 1),
+        'happiness_mid': round(h_mid_stored, 1),
+        'happiness_high': round(h_high_stored, 1),
+        'happiness_elder': round(h_elder_stored, 1),
         'education_index': round(education_index, 1),
         'health_index': round(health_index, 1),
         'infrastructure': round(infrastructure, 1),
         'opposition_strength': round(opposition_strength, 1),
         'corruption_index': round(corruption_index, 1),
+        'foreign_relations': round(foreign_relations, 1),
+        'coalition_support': round(coalition_support, 1),
         'tax_low': tax_low,
         'tax_mid': tax_mid,
         'tax_high': tax_high,

@@ -1,0 +1,12 @@
+[theme]
+base = "dark"
+# Desaturated/lightened accent (Tailwind teal-400 family) instead of a neon
+# #00FFCC - fully saturated colors "vibrate" and cause glare on dark
+# backgrounds even when the raw contrast ratio technically passes WCAG.
+primaryColor = "#2DD4BF"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#1B1F27"
+textColor = "#FAFAFA"
+
+[client]
+toolbarMode = "minimal"

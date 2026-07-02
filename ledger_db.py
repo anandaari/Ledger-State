@@ -220,8 +220,30 @@ DIFFICULTY_SETTINGS = {
 }
 
 # Opposition Strength above this makes them contest your budget in parliament
-# regardless of whether the deficit ceiling is respected.
+# regardless of whether the deficit ceiling is respected. A Coalition Support
+# score (built via apply_coalition_negotiation) offsets this check in app.py,
+# but never affects the harder no-confidence/election game-over conditions.
 BUDGET_OPPOSITION_CONTEST_THRESHOLD = 70.0
+
+# Sovereign Credit Rating - derived fresh every turn (never stored) from the
+# Debt/GDP ratio, downgraded one band further if Corruption is severe (>=50%).
+# Feeds two things: a multiplier on the debt interest rate (engine.py) and the
+# maximum size of a Sovereign Bond the player is allowed to issue (app.py).
+CREDIT_RATING_BANDS = [
+    (0.0, "AAA", 0.70, 0.15),
+    (-20.0, "AA", 0.85, 0.12),
+    (-50.0, "A", 1.00, 0.10),
+    (-80.0, "BBB", 1.15, 0.07),
+    (-120.0, "BB", 1.35, 0.04),
+    (-150.0, "B", 1.60, 0.02),
+]
+
+def get_credit_rating(debt_to_gdp_pct, corruption_index):
+    effective = debt_to_gdp_pct - (20.0 if corruption_index >= 50.0 else 0.0)
+    for threshold, letter, interest_mod, bond_cap_pct in CREDIT_RATING_BANDS:
+        if effective >= threshold:
+            return {"letter": letter, "interest_modifier": interest_mod, "bond_cap_pct": bond_cap_pct}
+    return {"letter": "D", "interest_modifier": 2.00, "bond_cap_pct": 0.0}
 
 def get_difficulty(game_id, db_path=DB_PATH):
     conn = get_connection(db_path)
@@ -321,6 +343,15 @@ RANDOM_EVENTS = {
             "Biarkan Pasar Menyesuaikan": {"happiness": -10.0, "opposition_strength": 5.0},
         },
     },
+    "trade_war": {
+        "title": "Ancaman Perang Dagang",
+        "description": "Hubungan Luar Negeri anjlok ke titik kritis - mitra dagang utama mengancam menjatuhkan tarif balasan besar-besaran terhadap ekspor Anda.",
+        "condition": lambda s: s['foreign_relations'] < 20.0,
+        "choices": {
+            "Buka Negosiasi Darurat": {"treasury": -30.0, "foreign_relations": 25.0},
+            "Terima Risiko & Bertahan": {"happiness": -10.0, "opposition_strength": 8.0},
+        },
+    },
 }
 
 def get_connection(db_path=DB_PATH):
@@ -347,7 +378,7 @@ def _schema_is_stale(cursor):
     if 'nation_history' in existing_tables:
         cursor.execute("PRAGMA table_info(nation_history)")
         cols = {row[1] for row in cursor.fetchall()}
-        if not {'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'tax_low', 'tax_mid', 'tax_high', 'opposition_strength', 'corruption_index', 'crime_rate', 'min_wage', 'export_tariff', 'import_tariff'}.issubset(cols):
+        if not {'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'tax_low', 'tax_mid', 'tax_high', 'opposition_strength', 'corruption_index', 'crime_rate', 'min_wage', 'export_tariff', 'import_tariff', 'foreign_relations', 'coalition_support', 'happiness_low', 'happiness_mid', 'happiness_high', 'happiness_elder'}.issubset(cols):
             return True
 
     if 'pending_events' in existing_tables:
@@ -401,11 +432,17 @@ def init_db(db_path=DB_PATH):
         employment_rate REAL NOT NULL,
         crime_rate REAL NOT NULL,
         happiness REAL NOT NULL,
+        happiness_low REAL NOT NULL,
+        happiness_mid REAL NOT NULL,
+        happiness_high REAL NOT NULL,
+        happiness_elder REAL NOT NULL,
         education_index REAL NOT NULL,
         health_index REAL NOT NULL,
         infrastructure REAL NOT NULL,
         opposition_strength REAL NOT NULL,
         corruption_index REAL NOT NULL,
+        foreign_relations REAL NOT NULL,
+        coalition_support REAL NOT NULL,
 
         -- Inputs
         tax_low REAL NOT NULL,
@@ -516,11 +553,13 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
     cursor.execute("""
     INSERT INTO nation_history (
         game_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
-        employment_rate, crime_rate, happiness, education_index, health_index, infrastructure, opposition_strength, corruption_index,
+        employment_rate, crime_rate, happiness, happiness_low, happiness_mid, happiness_high, happiness_elder,
+        education_index, health_index, infrastructure, opposition_strength, corruption_index,
+        foreign_relations, coalition_support,
         tax_low, tax_mid, tax_high,
         budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security,
         min_wage, export_tariff, import_tariff
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         game_id, initial_year,
         treasury,
@@ -532,10 +571,16 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
         0.80,
         0.44,
         55.0,
+        55.0,
+        55.0,
+        55.0,
+        55.0,
         50.0,
         50.0,
         50.0,
         15.0,
+        0.0,
+        50.0,
         0.0,
         preset["tax_low"],
         preset["tax_mid"],
@@ -620,7 +665,9 @@ def get_latest_turn(game_id, db_path=DB_PATH):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT history_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
-               employment_rate, crime_rate, happiness, education_index, health_index, infrastructure, opposition_strength, corruption_index,
+               employment_rate, crime_rate, happiness, happiness_low, happiness_mid, happiness_high, happiness_elder,
+               education_index, health_index, infrastructure, opposition_strength, corruption_index,
+               foreign_relations, coalition_support,
                tax_low, tax_mid, tax_high,
                budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security,
                min_wage, export_tariff, import_tariff
@@ -633,7 +680,9 @@ def get_latest_turn(game_id, db_path=DB_PATH):
     if row:
         columns = [
             'history_id', 'turn_year', 'treasury', 'gdp', 'pop_low', 'pop_mid', 'pop_high', 'pop_elder',
-            'employment_rate', 'crime_rate', 'happiness', 'education_index', 'health_index', 'infrastructure', 'opposition_strength', 'corruption_index',
+            'employment_rate', 'crime_rate', 'happiness', 'happiness_low', 'happiness_mid', 'happiness_high', 'happiness_elder',
+            'education_index', 'health_index', 'infrastructure', 'opposition_strength', 'corruption_index',
+            'foreign_relations', 'coalition_support',
             'tax_low', 'tax_mid', 'tax_high',
             'budget_education', 'budget_health', 'budget_infrastructure', 'budget_welfare', 'budget_security',
             'min_wage', 'export_tariff', 'import_tariff'
@@ -647,7 +696,8 @@ def get_history(game_id, db_path=DB_PATH):
     cursor.execute("""
         SELECT turn_year, treasury, gdp, (pop_low + pop_mid + pop_high + pop_elder) as population,
                employment_rate, happiness, education_index, health_index, infrastructure,
-               tax_low, tax_mid, tax_high, pop_low, pop_mid, pop_high, pop_elder, opposition_strength, corruption_index, crime_rate
+               tax_low, tax_mid, tax_high, pop_low, pop_mid, pop_high, pop_elder, opposition_strength, corruption_index, crime_rate,
+               happiness_low, happiness_mid, happiness_high, happiness_elder
         FROM nation_history
         WHERE game_id = ?
         ORDER BY turn_year ASC
@@ -662,16 +712,21 @@ def save_turn_state(game_id, data, db_path=DB_PATH):
     cursor.execute("""
     INSERT INTO nation_history (
         game_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
-        employment_rate, crime_rate, happiness, education_index, health_index, infrastructure, opposition_strength, corruption_index,
+        employment_rate, crime_rate, happiness, happiness_low, happiness_mid, happiness_high, happiness_elder,
+        education_index, health_index, infrastructure, opposition_strength, corruption_index,
+        foreign_relations, coalition_support,
         tax_low, tax_mid, tax_high,
         budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security,
         min_wage, export_tariff, import_tariff
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         game_id, data['turn_year'], data['treasury'], data['gdp'],
         data['pop_low'], data['pop_mid'], data['pop_high'], data['pop_elder'],
-        data['employment_rate'], data['crime_rate'], data['happiness'], data['education_index'],
+        data['employment_rate'], data['crime_rate'], data['happiness'],
+        data['happiness_low'], data['happiness_mid'], data['happiness_high'], data['happiness_elder'],
+        data['education_index'],
         data['health_index'], data['infrastructure'], data['opposition_strength'], data['corruption_index'],
+        data['foreign_relations'], data['coalition_support'],
         data['tax_low'], data['tax_mid'], data['tax_high'],
         data['budget_education'], data['budget_health'], data['budget_infrastructure'],
         data['budget_welfare'], data['budget_security'],
@@ -860,6 +915,104 @@ def apply_forced_budget_penalty(game_id, db_path=DB_PATH):
     )
     return {'opposition_strength': new_opposition, 'corruption_index': new_corruption}
 
+def apply_bond_issuance(game_id, amount_usd, db_path=DB_PATH):
+    """
+    Issues a sovereign bond for immediate cash, added directly to the current
+    (not-yet-ended) turn's treasury - same in-place mutation pattern as
+    apply_bribe. The added debt (or reduced surplus) then costs interest every
+    subsequent turn via engine.py's normal debt-interest formula, scaled by
+    whatever credit rating is in effect at that time.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT history_id, turn_year, treasury FROM nation_history
+        WHERE game_id = ? ORDER BY turn_year DESC LIMIT 1
+    """, (game_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    history_id, turn_year, treasury = row
+    new_treasury = treasury + amount_usd
+
+    cursor.execute("UPDATE nation_history SET treasury = ? WHERE history_id = ?", (new_treasury, history_id))
+    conn.commit()
+    conn.close()
+
+    log_event(
+        game_id, turn_year, 'ECONOMIC', "Obligasi Negara Diterbitkan",
+        f"Pemerintah menerbitkan obligasi senilai ${amount_usd:.1f}B untuk menambah kas negara. Beban bunga tahun-tahun mendatang akan meningkat mengikuti peringkat kredit saat ini.",
+        db_path=db_path
+    )
+    return {'treasury': new_treasury}
+
+def apply_trade_agreement(game_id, db_path=DB_PATH):
+    """
+    Spends a small diplomatic negotiation budget to strengthen a trade
+    agreement, raising Foreign Relations. Higher relations give a small GDP
+    growth bonus in engine.py; letting relations collapse instead risks the
+    "trade_war" narrative event.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT history_id, turn_year, treasury, foreign_relations FROM nation_history
+        WHERE game_id = ? ORDER BY turn_year DESC LIMIT 1
+    """, (game_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    history_id, turn_year, treasury, foreign_relations = row
+    new_treasury = treasury - 15.0
+    new_relations = min(100.0, foreign_relations + 15.0)
+
+    cursor.execute("UPDATE nation_history SET treasury = ?, foreign_relations = ? WHERE history_id = ?",
+                   (new_treasury, new_relations, history_id))
+    conn.commit()
+    conn.close()
+
+    log_event(
+        game_id, turn_year, 'ECONOMIC', "Perjanjian Dagang Diperkuat",
+        f"Delegasi diplomatik memperkuat perjanjian dagang dengan mitra internasional, menghabiskan $15.0B biaya negosiasi. Hubungan Luar Negeri naik menjadi {new_relations:.1f}%.",
+        db_path=db_path
+    )
+    return {'treasury': new_treasury, 'foreign_relations': new_relations}
+
+def apply_coalition_negotiation(game_id, db_path=DB_PATH):
+    """
+    Spends political capital to buy support from minor parties in parliament,
+    raising Coalition Support. app.py offsets Opposition Strength by a
+    fraction of this score when checking whether the Opposition contests the
+    APBN - it does NOT affect the harder no-confidence/election thresholds.
+    """
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT history_id, turn_year, treasury, coalition_support FROM nation_history
+        WHERE game_id = ? ORDER BY turn_year DESC LIMIT 1
+    """, (game_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    history_id, turn_year, treasury, coalition_support = row
+    new_treasury = treasury - 25.0
+    new_coalition = min(100.0, coalition_support + 20.0)
+
+    cursor.execute("UPDATE nation_history SET treasury = ?, coalition_support = ? WHERE history_id = ?",
+                   (new_treasury, new_coalition, history_id))
+    conn.commit()
+    conn.close()
+
+    log_event(
+        game_id, turn_year, 'SOCIAL', "Koalisi Parlemen Diperkuat",
+        f"Anda menegosiasikan dukungan partai-partai kecil di parlemen, menghabiskan $25.0B dana politik. Dukungan Koalisi naik menjadi {new_coalition:.1f}%.",
+        db_path=db_path
+    )
+    return {'treasury': new_treasury, 'coalition_support': new_coalition}
+
 def get_cabinet(game_id, db_path=DB_PATH):
     conn = get_connection(db_path)
     cursor = conn.cursor()
@@ -1018,7 +1171,7 @@ def resolve_pending_event(game_id, event_key, choice_label, db_path=DB_PATH):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT history_id, turn_year, treasury, gdp, happiness, opposition_strength,
-               corruption_index, infrastructure, health_index, education_index, crime_rate
+               corruption_index, infrastructure, health_index, education_index, crime_rate, foreign_relations
         FROM nation_history WHERE game_id = ? ORDER BY turn_year DESC LIMIT 1
     """, (game_id,))
     row = cursor.fetchone()
@@ -1027,7 +1180,7 @@ def resolve_pending_event(game_id, event_key, choice_label, db_path=DB_PATH):
         return None
 
     (history_id, turn_year, treasury, gdp, happiness, opposition_strength,
-     corruption_index, infrastructure, health_index, education_index, crime_rate) = row
+     corruption_index, infrastructure, health_index, education_index, crime_rate, foreign_relations) = row
 
     new_treasury = treasury + effects.get('treasury', 0.0)
     new_gdp = max(10.0, gdp + effects.get('gdp', 0.0))
@@ -1038,14 +1191,16 @@ def resolve_pending_event(game_id, event_key, choice_label, db_path=DB_PATH):
     new_health = max(0.0, min(100.0, health_index + effects.get('health_index', 0.0)))
     new_education = max(0.0, min(100.0, education_index + effects.get('education_index', 0.0)))
     new_crime = max(0.0, min(1.0, crime_rate + effects.get('crime_rate', 0.0)))
+    new_relations = max(0.0, min(100.0, foreign_relations + effects.get('foreign_relations', 0.0)))
 
     cursor.execute("""
         UPDATE nation_history
         SET treasury = ?, gdp = ?, happiness = ?, opposition_strength = ?,
-            corruption_index = ?, infrastructure = ?, health_index = ?, education_index = ?, crime_rate = ?
+            corruption_index = ?, infrastructure = ?, health_index = ?, education_index = ?, crime_rate = ?,
+            foreign_relations = ?
         WHERE history_id = ?
     """, (new_treasury, new_gdp, new_happiness, new_opposition, new_corruption,
-          new_infrastructure, new_health, new_education, new_crime, history_id))
+          new_infrastructure, new_health, new_education, new_crime, new_relations, history_id))
 
     cursor.execute("DELETE FROM pending_events WHERE game_id = ?", (game_id,))
     conn.commit()

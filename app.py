@@ -21,6 +21,21 @@ def main():
     # newer columns like corruption_index/crime_rate) can't crash the dashboard.
     database.init_db()
 
+    # Slider thumbs otherwise rely solely on the theme's primaryColor fill,
+    # which can read as low-contrast against a dark track/background - add a
+    # visible ring so the handle is legible regardless of the accent color.
+    st.markdown("""
+    <style>
+    div[data-baseweb="slider"] div[role="slider"] {
+        box-shadow: 0 0 0 3px rgba(250,250,250,0.18);
+        border: 2px solid #FAFAFA !important;
+    }
+    div[data-testid="stSlider"] {
+        padding-top: 6px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     if 'lang' not in st.session_state:
         st.session_state.lang = 'id'
 
@@ -98,6 +113,45 @@ def show_start_screen(lang):
         st.session_state.game_id = game_id
         st.rerun()
 
+# Desaturated/lightened semantic palette (Tailwind's "-400" shades) - chosen
+# over pure red/amber/green because fully saturated colors vibrate/glare on
+# a dark background even when their raw contrast ratio passes WCAG.
+STATUS_BAR_COLORS = {
+    "danger": "#F87171",
+    "caution": "#FBBF24",
+    "good": "#34D399",
+    "neutral": "#94A3B8",
+}
+
+def render_status_bar(label_text, value_pct, tier):
+    """Custom HTML progress bar with a semantic color (red/amber/green/gray)
+    instead of st.progress's fixed theme-accent fill, so severity is legible
+    at a glance instead of every bar looking visually identical."""
+    color = STATUS_BAR_COLORS[tier]
+    clamped = max(0.0, min(100.0, value_pct))
+    st.markdown(f"""
+    <div style="font-size:0.875rem; margin-bottom:3px;">{label_text}</div>
+    <div style="background-color:#262B36; border-radius:6px; height:10px; width:100%; overflow:hidden;">
+        <div style="background-color:{color}; width:{clamped}%; height:100%; border-radius:6px;"></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def render_event_entry(ev, show_year=True):
+    year = ev['turn_year']
+    title = ev['title']
+    desc = ev['description']
+    ev_type = ev['event_type']
+    prefix = f"[{year}] " if show_year else ""
+
+    if ev_type == 'CRISIS':
+        st.error(f"**⚠️ {prefix}{title}** — {desc}")
+    elif ev_type == 'ECONOMIC':
+        st.info(f"**📈 {prefix}{title}** — {desc}")
+    elif ev_type == 'SOCIAL':
+        st.warning(f"**👥 {prefix}{title}** — {desc}")
+    else:
+        st.write(f"**ℹ️ {prefix}{title}** — {desc}")
+
 def show_dashboard(game_id, lang):
     # 1. Fetch current game state
     latest_state = database.get_latest_turn(game_id)
@@ -118,7 +172,8 @@ def show_dashboard(game_id, lang):
     df_history = pd.DataFrame(history, columns=[
         'turn_year', 'treasury', 'gdp', 'population', 'employment_rate', 'happiness',
         'education_index', 'health_index', 'infrastructure', 'tax_low', 'tax_mid', 'tax_high',
-        'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'opposition_strength', 'corruption_index', 'crime_rate'
+        'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'opposition_strength', 'corruption_index', 'crime_rate',
+        'happiness_low', 'happiness_mid', 'happiness_high', 'happiness_elder'
     ])
 
     p_low = latest_state['pop_low']
@@ -153,6 +208,8 @@ def show_dashboard(game_id, lang):
     # Condition D: Election Defeat (every 5 years, Approval Rating below the
     # difficulty's narrow-win threshold)
     diff_settings = database.get_difficulty_settings(game_id)
+    debt_to_gdp_pct = (latest_state['treasury'] / latest_state['gdp']) * 100.0
+    rating_info = database.get_credit_rating(debt_to_gdp_pct, latest_state['corruption_index'])
     years_since_start = latest_state['turn_year'] - 2026
     if years_since_start > 0 and years_since_start % 5 == 0:
         approval_rating = 0.6 * latest_state['happiness'] + 0.4 * (100.0 - latest_state['opposition_strength'])
@@ -196,6 +253,54 @@ def show_dashboard(game_id, lang):
 
     form_locked = bool(pending_event) or bool(budget_crisis)
 
+    # Football-Manager-style flow: ending a fiscal year doesn't just silently
+    # jump to the next dashboard - a "Year in Review" popup summarizes what
+    # happened first, and if a narrative decision fired that same turn, a
+    # second blocking popup demands a choice before play can continue.
+    review_year_key = f'year_review_{game_id}'
+    pending_review_year = st.session_state.get(review_year_key)
+
+    if pending_review_year:
+        review_events = database.get_events(game_id, turn_year=pending_review_year)
+
+        @st.dialog(t(lang, "year_review_title", year=pending_review_year), dismissible=False)
+        def _year_review_dialog():
+            if not review_events:
+                st.write(t(lang, "no_events_message"))
+            else:
+                for ev in review_events:
+                    render_event_entry(ev, show_year=False)
+            st.divider()
+            if st.button(t(lang, "continue_button"), type="primary", width="stretch", key="year_review_continue"):
+                del st.session_state[review_year_key]
+                st.rerun()
+
+        _year_review_dialog()
+
+    elif pending_event:
+        if pending_event['event_key'] == "minister_advice":
+            data = pending_event['event_data']
+            dialog_title = f"Saran Menteri: {data['position']}"
+            event_description = f"{data['advisor_name']} ({data['tier']}) menyarankan: \"{data['advice_text']}\" (Biaya implementasi: {fmt_money(data['cost'])})"
+            choice_labels = ["Terima Saran", "Abaikan Saran"]
+        else:
+            event = database.RANDOM_EVENTS[pending_event['event_key']]
+            dialog_title = event['title']
+            event_description = event['description']
+            choice_labels = list(event['choices'].keys())
+
+        @st.dialog(t(lang, "pending_event_header", title=dialog_title), dismissible=False)
+        def _pending_event_dialog():
+            st.write(event_description)
+            choice_cols = st.columns(len(choice_labels))
+            for i, choice_label in enumerate(choice_labels):
+                with choice_cols[i]:
+                    if st.button(choice_label, key=f"event_choice_{i}", type="primary", width="stretch"):
+                        database.resolve_pending_event(game_id, pending_event['event_key'], choice_label)
+                        st.rerun()
+
+        _pending_event_dialog()
+
     st.sidebar.divider()
 
     # Slider & inputs inside a Form
@@ -211,6 +316,10 @@ def show_dashboard(game_id, lang):
         tax_low = tax_low_pct / 100.0
         tax_mid = tax_mid_pct / 100.0
         tax_high = tax_high_pct / 100.0
+
+        st.caption(t(lang, "class_happiness_caption",
+                     low=latest_state['happiness_low'], mid=latest_state['happiness_mid'],
+                     high=latest_state['happiness_high'], elder=latest_state['happiness_elder']))
 
         st.write(t(lang, "macro_policy_header"))
         min_wage = st.slider(
@@ -316,8 +425,10 @@ def show_dashboard(game_id, lang):
                 'import_tariff': import_tariff
             }
             opposition_strength_now = latest_state['opposition_strength']
+            coalition_support_now = latest_state['coalition_support']
+            effective_opposition = max(0.0, opposition_strength_now - coalition_support_now * 0.3)
             deficit_exceeded = deficit_pct_of_gdp > deficit_ceiling
-            opposition_contests = opposition_strength_now >= database.BUDGET_OPPOSITION_CONTEST_THRESHOLD
+            opposition_contests = effective_opposition >= database.BUDGET_OPPOSITION_CONTEST_THRESHOLD
             if deficit_exceeded or opposition_contests:
                 st.session_state[f'budget_crisis_{game_id}'] = {
                     'inputs': inputs,
@@ -326,7 +437,8 @@ def show_dashboard(game_id, lang):
                     'ceiling': deficit_ceiling,
                 }
             else:
-                engine.simulate_turn(game_id, inputs)
+                new_state = engine.simulate_turn(game_id, inputs)
+                st.session_state[f'year_review_{game_id}'] = new_state['turn_year']
             st.rerun()
 
     st.sidebar.divider()
@@ -341,36 +453,54 @@ def show_dashboard(game_id, lang):
         st.sidebar.caption(t(lang, "bribe_done_caption"))
 
     st.sidebar.divider()
+    st.sidebar.write(t(lang, "diplomacy_header"))
+
+    # Sovereign Bond - size capped by the current Credit Rating
+    bond_cap_usd = rating_info['bond_cap_pct'] * latest_state['gdp']
+    bond_cap_local = database.to_local(bond_cap_usd, country_name)
+    st.sidebar.caption(t(lang, "credit_rating_caption", rating=rating_info['letter'], cap=fmt_money(bond_cap_usd)))
+    bond_key = f"bonded_{game_id}_{latest_state['turn_year']}"
+    already_bonded = st.session_state.get(bond_key, False)
+    bond_amount_local = st.sidebar.number_input(
+        t(lang, "bond_amount_label"), min_value=0.0, max_value=max(0.01, bond_cap_local), value=0.0,
+        step=max(0.01, database.to_local(1.0, country_name)), disabled=already_bonded or bond_cap_local <= 0
+    )
+    if st.sidebar.button(t(lang, "issue_bond_button"), disabled=already_bonded or bond_amount_local <= 0):
+        bond_amount_usd = database.from_local(bond_amount_local, country_name)
+        database.apply_bond_issuance(game_id, bond_amount_usd)
+        st.session_state[bond_key] = True
+        st.rerun()
+    if already_bonded:
+        st.sidebar.caption(t(lang, "bond_done_caption"))
+
+    # Trade Agreement - raises Foreign Relations
+    st.sidebar.caption(t(lang, "trade_agreement_caption"))
+    trade_key = f"traded_{game_id}_{latest_state['turn_year']}"
+    already_traded = st.session_state.get(trade_key, False)
+    if st.sidebar.button(t(lang, "trade_agreement_button", amount=fmt_money(15)), disabled=already_traded):
+        database.apply_trade_agreement(game_id)
+        st.session_state[trade_key] = True
+        st.rerun()
+    if already_traded:
+        st.sidebar.caption(t(lang, "trade_agreement_done_caption"))
+
+    # Coalition Negotiation - raises Coalition Support
+    st.sidebar.caption(t(lang, "coalition_caption"))
+    coalition_key = f"coalition_{game_id}_{latest_state['turn_year']}"
+    already_coalition = st.session_state.get(coalition_key, False)
+    if st.sidebar.button(t(lang, "coalition_button", amount=fmt_money(25)), disabled=already_coalition):
+        database.apply_coalition_negotiation(game_id)
+        st.session_state[coalition_key] = True
+        st.rerun()
+    if already_coalition:
+        st.sidebar.caption(t(lang, "coalition_done_caption"))
+
+    st.sidebar.divider()
     if st.sidebar.button(t(lang, "abandon_button"), type="secondary"):
         st.session_state.game_id = None
         st.rerun()
 
     # 4. Main UI Layout - Command Center (dense monitoring, minimal scrolling)
-
-    # Pending Random Event - a discrete narrative choice that must be
-    # resolved before the fiscal year can end. Shown prominently at the top;
-    # the rest of the dashboard still renders below for context.
-    if pending_event:
-        if pending_event['event_key'] == "minister_advice":
-            data = pending_event['event_data']
-            title = f"Saran Menteri: {data['position']}"
-            description = f"{data['advisor_name']} ({data['tier']}) menyarankan: \"{data['advice_text']}\" (Biaya implementasi: {fmt_money(data['cost'])})"
-            choice_labels = ["Terima Saran", "Abaikan Saran"]
-        else:
-            event = database.RANDOM_EVENTS[pending_event['event_key']]
-            title = event['title']
-            description = event['description']
-            choice_labels = list(event['choices'].keys())
-
-        st.warning(t(lang, "pending_event_header", title=title))
-        st.write(description)
-        choice_cols = st.columns(len(choice_labels))
-        for i, choice_label in enumerate(choice_labels):
-            with choice_cols[i]:
-                if st.button(choice_label, key=f"event_choice_{i}", type="primary", width="stretch"):
-                    database.resolve_pending_event(game_id, pending_event['event_key'], choice_label)
-                    st.rerun()
-        st.divider()
 
     # Budget Confrontation - the proposed APBN either breaches the legal
     # deficit ceiling or the Opposition is strong enough to contest it in
@@ -391,8 +521,9 @@ def show_dashboard(game_id, lang):
                 st.rerun()
         with col_bc2:
             if st.button(t(lang, "force_decree_button"), key="budget_crisis_force", type="primary", width="stretch"):
-                engine.simulate_turn(game_id, budget_crisis['inputs'])
+                new_state = engine.simulate_turn(game_id, budget_crisis['inputs'])
                 database.apply_forced_budget_penalty(game_id)
+                st.session_state[f'year_review_{game_id}'] = new_state['turn_year']
                 del st.session_state[f'budget_crisis_{game_id}']
                 st.rerun()
         st.divider()
@@ -401,50 +532,49 @@ def show_dashboard(game_id, lang):
     if sandbox_mode:
         st.caption(t(lang, "sandbox_caption"))
 
-    # Row 1: Key Performance Indicators (KPIs)
-    col1, col2, col3, col4 = st.columns(4)
+    # Row 1: Key Performance Indicators (KPIs) - grouped in a bordered card
+    with st.container(border=True):
+        st.caption(t(lang, "kpi_card_label"))
+        col1, col2, col3, col4 = st.columns(4)
 
-    # Calculate differentials (deltas) from previous turns for visual metrics
-    gdp_delta = 0.0
-    treasury_delta = 0.0
-    happiness_delta = 0.0
-    pop_delta = 0.0
+        # Calculate differentials (deltas) from previous turns for visual metrics
+        gdp_delta = 0.0
+        treasury_delta = 0.0
+        happiness_delta = 0.0
+        pop_delta = 0.0
 
-    if len(df_history) >= 2:
-        gdp_delta = float(df_history['gdp'].iloc[-1] - df_history['gdp'].iloc[-2])
-        treasury_delta = float(df_history['treasury'].iloc[-1] - df_history['treasury'].iloc[-2])
-        happiness_delta = float(df_history['happiness'].iloc[-1] - df_history['happiness'].iloc[-2])
-        pop_delta = int(df_history['population'].iloc[-1] - df_history['population'].iloc[-2])
+        if len(df_history) >= 2:
+            gdp_delta = float(df_history['gdp'].iloc[-1] - df_history['gdp'].iloc[-2])
+            treasury_delta = float(df_history['treasury'].iloc[-1] - df_history['treasury'].iloc[-2])
+            happiness_delta = float(df_history['happiness'].iloc[-1] - df_history['happiness'].iloc[-2])
+            pop_delta = int(df_history['population'].iloc[-1] - df_history['population'].iloc[-2])
 
-    with col1:
-        st.metric(t(lang, "kpi_gdp_label"),
-                  fmt_money(latest_state['gdp']),
-                  delta=f"{fmt_money(gdp_delta, signed=True)} ({((gdp_delta)/max(1.0, latest_state['gdp']-gdp_delta))*100:.1f}%)",
-                  help=t(lang, "kpi_gdp_help"))
-    with col2:
-        st.metric(t(lang, "kpi_treasury_label"),
-                  fmt_money(latest_state['treasury']),
-                  delta=fmt_money(treasury_delta, signed=True),
-                  delta_color="normal" if latest_state['treasury'] >= 0 else "inverse",
-                  help=t(lang, "kpi_treasury_help"))
-    with col3:
-        st.metric(t(lang, "kpi_happiness_label"),
-                  f"{latest_state['happiness']:.1f}%",
-                  delta=f"{happiness_delta:+.1f}%",
-                  delta_color="normal" if latest_state['happiness'] >= 40 else "inverse",
-                  help=t(lang, "kpi_happiness_help"))
-    with col4:
-        st.metric(t(lang, "kpi_population_label"),
-                  f"{p_total:,}",
-                  delta=t(lang, "kpi_population_delta", value=pop_delta),
-                  help=t(lang, "kpi_population_help"))
-
-    st.divider()
+        with col1:
+            st.metric(t(lang, "kpi_gdp_label"),
+                      fmt_money(latest_state['gdp']),
+                      delta=f"{fmt_money(gdp_delta, signed=True)} ({((gdp_delta)/max(1.0, latest_state['gdp']-gdp_delta))*100:.1f}%)",
+                      help=t(lang, "kpi_gdp_help"))
+        with col2:
+            st.metric(t(lang, "kpi_treasury_label"),
+                      fmt_money(latest_state['treasury']),
+                      delta=fmt_money(treasury_delta, signed=True),
+                      delta_color="normal" if latest_state['treasury'] >= 0 else "inverse",
+                      help=t(lang, "kpi_treasury_help"))
+        with col3:
+            st.metric(t(lang, "kpi_happiness_label"),
+                      f"{latest_state['happiness']:.1f}%",
+                      delta=f"{happiness_delta:+.1f}%",
+                      delta_color="normal" if latest_state['happiness'] >= 40 else "inverse",
+                      help=t(lang, "kpi_happiness_help"))
+        with col4:
+            st.metric(t(lang, "kpi_population_label"),
+                      f"{p_total:,}",
+                      delta=t(lang, "kpi_population_delta", value=pop_delta),
+                      help=t(lang, "kpi_population_help"))
 
     # Row 2: Monitoring Ekonomi, Sosial & Politik - one dense glance, no extra headers
     employment_pct = latest_state['employment_rate'] * 100.0
     crime_pct = latest_state['crime_rate'] * 100.0
-    debt_to_gdp_pct = (latest_state['treasury'] / latest_state['gdp']) * 100.0
     opp_strength = latest_state['opposition_strength']
     corruption = latest_state['corruption_index']
     approval_rating = 0.6 * latest_state['happiness'] + 0.4 * (100.0 - opp_strength)
@@ -461,47 +591,64 @@ def show_dashboard(game_id, lang):
         prev_approval = 0.6 * df_history['happiness'].iloc[-2] + 0.4 * (100.0 - df_history['opposition_strength'].iloc[-2])
         approval_delta = approval_rating - prev_approval
 
-    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    with col_m1:
-        st.metric(t(lang, "monitor_employment_label"), f"{employment_pct:.1f}%", delta=f"{employment_delta:+.1f}%",
-                   help=t(lang, "monitor_employment_help"))
-    with col_m2:
-        st.metric(t(lang, "monitor_crime_label"), f"{crime_pct:.1f}%", delta=f"{crime_delta:+.1f}%", delta_color="inverse",
-                   help=t(lang, "monitor_crime_help"))
-    with col_m3:
-        st.metric(t(lang, "monitor_debt_gdp_label"), f"{debt_to_gdp_pct:.1f}%", delta=f"{debt_to_gdp_delta:+.1f}%",
-                   help=t(lang, "monitor_debt_gdp_help"))
-    with col_m4:
-        st.metric(t(lang, "monitor_approval_label"), f"{approval_rating:.1f}%", delta=f"{approval_delta:+.1f}%",
-                   help=t(lang, "monitor_approval_help", mandate=diff_settings["election_mandate_threshold"], narrow=diff_settings["election_narrow_threshold"]))
+    with st.container(border=True):
+        st.caption(t(lang, "monitor_card_label"))
+        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+        with col_m1:
+            st.metric(t(lang, "monitor_employment_label"), f"{employment_pct:.1f}%", delta=f"{employment_delta:+.1f}%",
+                       help=t(lang, "monitor_employment_help"))
+        with col_m2:
+            st.metric(t(lang, "monitor_crime_label"), f"{crime_pct:.1f}%", delta=f"{crime_delta:+.1f}%", delta_color="inverse",
+                       help=t(lang, "monitor_crime_help"))
+        with col_m3:
+            st.metric(t(lang, "monitor_debt_gdp_label"), f"{debt_to_gdp_pct:.1f}%", delta=f"{debt_to_gdp_delta:+.1f}%",
+                       help=t(lang, "monitor_debt_gdp_help"))
+        with col_m4:
+            st.metric(t(lang, "monitor_approval_label"), f"{approval_rating:.1f}%", delta=f"{approval_delta:+.1f}%",
+                       help=t(lang, "monitor_approval_help", mandate=diff_settings["election_mandate_threshold"], narrow=diff_settings["election_narrow_threshold"]))
+        with col_m5:
+            st.metric(t(lang, "monitor_credit_rating_label"), rating_info['letter'],
+                       help=t(lang, "monitor_credit_rating_help"))
 
-    opp_status = t(lang, "opposition_status_critical") if opp_strength >= 80 else (t(lang, "opposition_status_watch") if opp_strength >= 50 else t(lang, "opposition_status_ok"))
-    corruption_status = t(lang, "corruption_status_severe") if corruption >= 50 else (t(lang, "corruption_status_watch") if corruption >= 20 else t(lang, "corruption_status_clean"))
-    col_p1, col_p2 = st.columns(2)
-    with col_p1:
-        st.progress(opp_strength / 100.0, text=t(lang, "opposition_progress_text", party=opposition_party, value=opp_strength, status=opp_status))
-        st.caption(t(lang, "opposition_caption"))
-    with col_p2:
-        st.progress(corruption / 100.0, text=t(lang, "corruption_progress_text", value=corruption, status=corruption_status))
-        st.caption(t(lang, "corruption_caption"))
-    if opp_strength >= 80:
-        st.error(t(lang, "opposition_critical_warning"))
-
-    st.divider()
+        foreign_relations = latest_state['foreign_relations']
+        coalition_support = latest_state['coalition_support']
+        opp_tier = "danger" if opp_strength >= 80 else ("caution" if opp_strength >= 50 else "good")
+        corruption_tier = "danger" if corruption >= 50 else ("caution" if corruption >= 20 else "good")
+        relations_tier = "good" if foreign_relations >= 70 else ("caution" if foreign_relations >= 30 else "danger")
+        coalition_tier = "good" if coalition_support >= 50 else ("caution" if coalition_support >= 20 else "neutral")
+        opp_status = t(lang, "opposition_status_critical") if opp_strength >= 80 else (t(lang, "opposition_status_watch") if opp_strength >= 50 else t(lang, "opposition_status_ok"))
+        corruption_status = t(lang, "corruption_status_severe") if corruption >= 50 else (t(lang, "corruption_status_watch") if corruption >= 20 else t(lang, "corruption_status_clean"))
+        relations_status = t(lang, "relations_status_friendly") if foreign_relations >= 70 else (t(lang, "relations_status_neutral") if foreign_relations >= 30 else t(lang, "relations_status_tense"))
+        coalition_status = t(lang, "coalition_status_strong") if coalition_support >= 50 else (t(lang, "coalition_status_weak") if coalition_support >= 20 else t(lang, "coalition_status_none"))
+        col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+        with col_p1:
+            render_status_bar(t(lang, "opposition_progress_text", party=opposition_party, value=opp_strength, status=opp_status), opp_strength, opp_tier)
+            st.caption(t(lang, "opposition_caption"))
+        with col_p2:
+            render_status_bar(t(lang, "corruption_progress_text", value=corruption, status=corruption_status), corruption, corruption_tier)
+            st.caption(t(lang, "corruption_caption"))
+        with col_p3:
+            render_status_bar(t(lang, "relations_progress_text", value=foreign_relations, status=relations_status), foreign_relations, relations_tier)
+            st.caption(t(lang, "relations_caption"))
+        with col_p4:
+            render_status_bar(t(lang, "coalition_progress_text", value=coalition_support, status=coalition_status), coalition_support, coalition_tier)
+            st.caption(t(lang, "coalition_progress_caption"))
+        if opp_strength >= 80:
+            st.error(t(lang, "opposition_critical_warning"))
 
     # Row 3: Crisis and Alert Center
     if active_crisis:
-        st.error(t(lang, "crisis_header", name=active_crisis['name']))
-        st.write(t(lang, "crisis_briefing", desc=active_crisis['description']))
-        st.write(t(lang, "crisis_required_policy", desc=active_crisis['requirement_desc']))
+        with st.container(border=True):
+            st.error(t(lang, "crisis_header", name=active_crisis['name']))
+            st.write(t(lang, "crisis_briefing", desc=active_crisis['description']))
+            st.write(t(lang, "crisis_required_policy", desc=active_crisis['requirement_desc']))
 
-        # Render a progress bar visual
-        progress_val = float(active_crisis['current_progress'] / active_crisis['target_progress'])
-        st.progress(progress_val, text=t(lang, "crisis_progress_text", current=active_crisis['current_progress'], target=active_crisis['target_progress']))
+            # Render a progress bar visual
+            progress_val = float(active_crisis['current_progress'] / active_crisis['target_progress'])
+            st.progress(progress_val, text=t(lang, "crisis_progress_text", current=active_crisis['current_progress'], target=active_crisis['target_progress']))
 
-        turns_left = active_crisis['duration_turns'] - (latest_state['turn_year'] - active_crisis['start_year'] + 1)
-        st.write(t(lang, "crisis_years_remaining", years=max(0, turns_left)))
-        st.divider()
+            turns_left = active_crisis['duration_turns'] - (latest_state['turn_year'] - active_crisis['start_year'] + 1)
+            st.write(t(lang, "crisis_years_remaining", years=max(0, turns_left)))
 
     # Row 3: Sub-indices and Charts tabs
     tab_names = t(lang, "tab_names")
@@ -543,6 +690,20 @@ def show_dashboard(game_id, lang):
     with tab3:
         st.subheader(t(lang, "tab3_subheader"))
 
+        ch1, ch2, ch3, ch4 = st.columns(4)
+        with ch1:
+            st.metric(t(lang, "class_happiness_low_label"), f"{latest_state['happiness_low']:.1f}%",
+                      help=t(lang, "class_happiness_low_help"))
+        with ch2:
+            st.metric(t(lang, "class_happiness_mid_label"), f"{latest_state['happiness_mid']:.1f}%",
+                      help=t(lang, "class_happiness_mid_help"))
+        with ch3:
+            st.metric(t(lang, "class_happiness_high_label"), f"{latest_state['happiness_high']:.1f}%",
+                      help=t(lang, "class_happiness_high_help"))
+        with ch4:
+            st.metric(t(lang, "class_happiness_elder_label"), f"{latest_state['happiness_elder']:.1f}%",
+                      help=t(lang, "class_happiness_elder_help"))
+
         col_pie, col_table = st.columns([1, 1])
         with col_pie:
             # Pie Chart of Class Demographics
@@ -581,6 +742,14 @@ def show_dashboard(game_id, lang):
             fig_mobility.update_layout(title=t(lang, "mobility_chart_title"), template="plotly_dark")
             st.plotly_chart(fig_mobility, width='stretch')
 
+        fig_class_happiness = go.Figure()
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['happiness_low'], mode='lines+markers', name=t(lang, "label_low_income"), line=dict(color='#FF9F1C')))
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['happiness_mid'], mode='lines+markers', name=t(lang, "label_mid_income"), line=dict(color='#FFD166')))
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['happiness_high'], mode='lines+markers', name=t(lang, "label_high_income"), line=dict(color='#06D6A0')))
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['happiness_elder'], mode='lines+markers', name=t(lang, "label_pensioners"), line=dict(color='#118AB2')))
+        fig_class_happiness.update_layout(title=t(lang, "class_happiness_chart_title"), template="plotly_dark")
+        st.plotly_chart(fig_class_happiness, width='stretch')
+
     with tab4:
         st.subheader(t(lang, "tab4_subheader"))
         events = database.get_events(game_id)
@@ -589,24 +758,7 @@ def show_dashboard(game_id, lang):
             st.write(t(lang, "no_events_message"))
         else:
             for ev in events:
-                year = ev['turn_year']
-                title = ev['title']
-                desc = ev['description']
-                ev_type = ev['event_type']
-
-                # Assign icons / formatting by event type
-                if ev_type == 'CRISIS':
-                    header = f"⚠️ [{year}] {title}"
-                    st.error(f"**{header}** — {desc}")
-                elif ev_type == 'ECONOMIC':
-                    header = f"📈 [{year}] {title}"
-                    st.info(f"**{header}** — {desc}")
-                elif ev_type == 'SOCIAL':
-                    header = f"👥 [{year}] {title}"
-                    st.warning(f"**{header}** — {desc}")
-                else:
-                    header = f"ℹ️ [{year}] {title}"
-                    st.write(f"**{header}** — {desc}")
+                render_event_entry(ev, show_year=True)
 
     with tab5:
         st.subheader(t(lang, "tab5_subheader"))
