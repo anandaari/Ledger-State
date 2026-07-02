@@ -150,11 +150,13 @@ def show_dashboard(game_id, lang):
             is_game_over = True
             game_over_reason = "no_confidence"
 
-    # Condition D: Election Defeat (every 5 years, Approval Rating < 40%)
+    # Condition D: Election Defeat (every 5 years, Approval Rating below the
+    # difficulty's narrow-win threshold)
+    diff_settings = database.get_difficulty_settings(game_id)
     years_since_start = latest_state['turn_year'] - 2026
     if years_since_start > 0 and years_since_start % 5 == 0:
         approval_rating = 0.6 * latest_state['happiness'] + 0.4 * (100.0 - latest_state['opposition_strength'])
-        if approval_rating < 40.0:
+        if approval_rating < diff_settings["election_narrow_threshold"]:
             is_game_over = True
             game_over_reason = "voted_out"
 
@@ -188,6 +190,12 @@ def show_dashboard(game_id, lang):
     if pending_event:
         st.sidebar.warning(t(lang, "pending_event_sidebar_warning"))
 
+    budget_crisis = st.session_state.get(f'budget_crisis_{game_id}')
+    if budget_crisis:
+        st.sidebar.warning(t(lang, "budget_crisis_sidebar_warning"))
+
+    form_locked = bool(pending_event) or bool(budget_crisis)
+
     st.sidebar.divider()
 
     # Slider & inputs inside a Form
@@ -213,25 +221,47 @@ def show_dashboard(game_id, lang):
             t(lang, "export_tariff_label"), 0, 30, int(latest_state['export_tariff']), step=1,
             help=t(lang, "export_tariff_help")
         )
+        import_tariff = st.slider(
+            t(lang, "import_tariff_label"), 0, 30, int(latest_state['import_tariff']), step=1,
+            help=t(lang, "import_tariff_help")
+        )
 
-        st.write(t(lang, "spending_header"))
-        # Range is 0 to GDP/2 for each allocation
+        currency_unit = database.currency_unit_suffix(country_name)
+        st.write(f"{t(lang, 'spending_header')} ({currency_unit})")
+        # Range is 0 to GDP/2 for each allocation - shown/entered in local
+        # currency, converted back to USD billions before reaching the engine.
         max_budget = float(latest_state['gdp'] / 2.0)
-        b_ed = st.number_input(t(lang, "edu_budget_label"), min_value=0.0, max_value=max_budget, value=float(latest_state['budget_education']), step=0.1,
-                                help=t(lang, "edu_budget_help"))
-        b_hl = st.number_input(t(lang, "health_budget_label"), min_value=0.0, max_value=max_budget, value=float(latest_state['budget_health']), step=0.1,
-                                help=t(lang, "health_budget_help"))
-        b_inf = st.number_input(t(lang, "infra_budget_label"), min_value=0.0, max_value=max_budget, value=float(latest_state['budget_infrastructure']), step=0.1,
-                                 help=t(lang, "infra_budget_help"))
-        b_welf = st.number_input(t(lang, "welfare_budget_label"), min_value=0.0, max_value=max_budget, value=float(latest_state['budget_welfare']), step=0.1,
-                                  help=t(lang, "welfare_budget_help"))
-        b_sec = st.number_input(t(lang, "security_budget_label"), min_value=0.0, max_value=max_budget, value=float(latest_state['budget_security']), step=0.1,
-                                 help=t(lang, "security_budget_help"))
+        max_budget_local = database.to_local(max_budget, country_name)
+        budget_step = max(0.01, database.to_local(0.1, country_name))
+
+        b_ed_local = st.number_input(t(lang, "edu_budget_label"), min_value=0.0, max_value=max_budget_local,
+                                      value=database.to_local(latest_state['budget_education'], country_name), step=budget_step,
+                                      help=t(lang, "edu_budget_help"))
+        b_hl_local = st.number_input(t(lang, "health_budget_label"), min_value=0.0, max_value=max_budget_local,
+                                      value=database.to_local(latest_state['budget_health'], country_name), step=budget_step,
+                                      help=t(lang, "health_budget_help"))
+        b_inf_local = st.number_input(t(lang, "infra_budget_label"), min_value=0.0, max_value=max_budget_local,
+                                       value=database.to_local(latest_state['budget_infrastructure'], country_name), step=budget_step,
+                                       help=t(lang, "infra_budget_help"))
+        b_welf_local = st.number_input(t(lang, "welfare_budget_label"), min_value=0.0, max_value=max_budget_local,
+                                        value=database.to_local(latest_state['budget_welfare'], country_name), step=budget_step,
+                                        help=t(lang, "welfare_budget_help"))
+        b_sec_local = st.number_input(t(lang, "security_budget_label"), min_value=0.0, max_value=max_budget_local,
+                                       value=database.to_local(latest_state['budget_security'], country_name), step=budget_step,
+                                       help=t(lang, "security_budget_help"))
+
+        b_ed = database.from_local(b_ed_local, country_name)
+        b_hl = database.from_local(b_hl_local, country_name)
+        b_inf = database.from_local(b_inf_local, country_name)
+        b_welf = database.from_local(b_welf_local, country_name)
+        b_sec = database.from_local(b_sec_local, country_name)
 
         # Real-time balances
         total_spending = b_ed + b_hl + b_inf + b_welf + b_sec
-        debt_interest = abs(latest_state['treasury']) * 0.06 if latest_state['treasury'] < 0 else 0.0
-        total_outflow = total_spending + debt_interest
+        cabinet_salaries_total = sum(c['salary'] for c in database.get_cabinet(game_id))
+        debt_interest = abs(latest_state['treasury']) * diff_settings["interest_rate_normal"] if latest_state['treasury'] < 0 else 0.0
+        mandatory_spending = debt_interest + cabinet_salaries_total
+        total_outflow = total_spending + mandatory_spending
 
         # Approximate Revenue calculation
         tax_eff = 0.90 + 0.10 * (latest_state['education_index'] / 100.0)
@@ -245,11 +275,16 @@ def show_dashboard(game_id, lang):
         projected_rev = (rev_low + rev_mid + rev_high) * tax_eff
 
         export_dependency = database.COUNTRY_PRESETS[country_name]['export_dependency']
+        import_dependency = database.COUNTRY_PRESETS[country_name]['import_dependency']
         projected_rev += latest_state['gdp'] * export_dependency * (export_tariff / 100.0) * 0.5
+        projected_rev += latest_state['gdp'] * import_dependency * (import_tariff / 100.0) * 0.5
 
         projected_net = projected_rev - total_outflow
 
         st.write("---")
+        st.caption(t(lang, "mandatory_vs_discretionary",
+                     mandatory=database.format_currency(mandatory_spending, country_name, decimals=2),
+                     discretionary=database.format_currency(total_spending, country_name, decimals=2)))
         st.write(t(lang, "projected_inflow", value=database.format_currency(projected_rev, country_name, decimals=2)))
         st.write(t(lang, "projected_outflow", value=database.format_currency(total_outflow, country_name, decimals=2)))
 
@@ -258,11 +293,15 @@ def show_dashboard(game_id, lang):
         else:
             st.error(t(lang, "deficit_label", value=database.format_currency(abs(projected_net), country_name, decimals=2)))
 
-        if pending_event:
-            st.warning(t(lang, "pending_event_form_warning"))
-        submit_btn = st.form_submit_button(t(lang, "end_fiscal_year_button", year=latest_state['turn_year']), disabled=bool(pending_event))
+        deficit_pct_of_gdp = max(0.0, -projected_net / latest_state['gdp'] * 100.0)
+        deficit_ceiling = diff_settings["deficit_ceiling_pct"]
+        st.caption(t(lang, "deficit_ceiling_note", value=deficit_ceiling))
 
-        if submit_btn and not pending_event:
+        if form_locked:
+            st.warning(t(lang, "pending_event_form_warning"))
+        submit_btn = st.form_submit_button(t(lang, "end_fiscal_year_button", year=latest_state['turn_year']), disabled=form_locked)
+
+        if submit_btn and not form_locked:
             inputs = {
                 'tax_low': tax_low,
                 'tax_mid': tax_mid,
@@ -273,9 +312,21 @@ def show_dashboard(game_id, lang):
                 'budget_welfare': b_welf,
                 'budget_security': b_sec,
                 'min_wage': min_wage,
-                'export_tariff': export_tariff
+                'export_tariff': export_tariff,
+                'import_tariff': import_tariff
             }
-            engine.simulate_turn(game_id, inputs)
+            opposition_strength_now = latest_state['opposition_strength']
+            deficit_exceeded = deficit_pct_of_gdp > deficit_ceiling
+            opposition_contests = opposition_strength_now >= database.BUDGET_OPPOSITION_CONTEST_THRESHOLD
+            if deficit_exceeded or opposition_contests:
+                st.session_state[f'budget_crisis_{game_id}'] = {
+                    'inputs': inputs,
+                    'reason': 'deficit' if deficit_exceeded else 'opposition',
+                    'deficit_pct': deficit_pct_of_gdp,
+                    'ceiling': deficit_ceiling,
+                }
+            else:
+                engine.simulate_turn(game_id, inputs)
             st.rerun()
 
     st.sidebar.divider()
@@ -300,15 +351,50 @@ def show_dashboard(game_id, lang):
     # resolved before the fiscal year can end. Shown prominently at the top;
     # the rest of the dashboard still renders below for context.
     if pending_event:
-        event = database.RANDOM_EVENTS[pending_event['event_key']]
-        st.warning(t(lang, "pending_event_header", title=event['title']))
-        st.write(event['description'])
-        choice_cols = st.columns(len(event['choices']))
-        for i, choice_label in enumerate(event['choices'].keys()):
+        if pending_event['event_key'] == "minister_advice":
+            data = pending_event['event_data']
+            title = f"Saran Menteri: {data['position']}"
+            description = f"{data['advisor_name']} ({data['tier']}) menyarankan: \"{data['advice_text']}\" (Biaya implementasi: {fmt_money(data['cost'])})"
+            choice_labels = ["Terima Saran", "Abaikan Saran"]
+        else:
+            event = database.RANDOM_EVENTS[pending_event['event_key']]
+            title = event['title']
+            description = event['description']
+            choice_labels = list(event['choices'].keys())
+
+        st.warning(t(lang, "pending_event_header", title=title))
+        st.write(description)
+        choice_cols = st.columns(len(choice_labels))
+        for i, choice_label in enumerate(choice_labels):
             with choice_cols[i]:
                 if st.button(choice_label, key=f"event_choice_{i}", type="primary", width="stretch"):
                     database.resolve_pending_event(game_id, pending_event['event_key'], choice_label)
                     st.rerun()
+        st.divider()
+
+    # Budget Confrontation - the proposed APBN either breaches the legal
+    # deficit ceiling or the Opposition is strong enough to contest it in
+    # parliament outright. Forcing it through by decree works, but at a
+    # real political cost (this is the "wrong choice" consequence).
+    if budget_crisis:
+        if budget_crisis['reason'] == 'deficit':
+            reason_text = t(lang, "budget_crisis_deficit_reason", deficit=budget_crisis['deficit_pct'], ceiling=budget_crisis['ceiling'])
+        else:
+            reason_text = t(lang, "budget_crisis_opposition_reason", opposition=opposition_party)
+
+        st.error(t(lang, "budget_crisis_header"))
+        st.write(reason_text)
+        col_bc1, col_bc2 = st.columns(2)
+        with col_bc1:
+            if st.button(t(lang, "revise_budget_button"), key="budget_crisis_revise", width="stretch"):
+                del st.session_state[f'budget_crisis_{game_id}']
+                st.rerun()
+        with col_bc2:
+            if st.button(t(lang, "force_decree_button"), key="budget_crisis_force", type="primary", width="stretch"):
+                engine.simulate_turn(game_id, budget_crisis['inputs'])
+                database.apply_forced_budget_penalty(game_id)
+                del st.session_state[f'budget_crisis_{game_id}']
+                st.rerun()
         st.divider()
 
     st.subheader(t(lang, "year_header", country=country_name, year=latest_state['turn_year']))
@@ -387,7 +473,7 @@ def show_dashboard(game_id, lang):
                    help=t(lang, "monitor_debt_gdp_help"))
     with col_m4:
         st.metric(t(lang, "monitor_approval_label"), f"{approval_rating:.1f}%", delta=f"{approval_delta:+.1f}%",
-                   help=t(lang, "monitor_approval_help"))
+                   help=t(lang, "monitor_approval_help", mandate=diff_settings["election_mandate_threshold"], narrow=diff_settings["election_narrow_threshold"]))
 
     opp_status = t(lang, "opposition_status_critical") if opp_strength >= 80 else (t(lang, "opposition_status_watch") if opp_strength >= 50 else t(lang, "opposition_status_ok"))
     corruption_status = t(lang, "corruption_status_severe") if corruption >= 50 else (t(lang, "corruption_status_watch") if corruption >= 20 else t(lang, "corruption_status_clean"))
@@ -423,10 +509,12 @@ def show_dashboard(game_id, lang):
 
     with tab1:
         st.subheader(t(lang, "tab1_subheader"))
-        # Line plot for GDP & Treasury
+        # Line plot for GDP & Treasury - values and legend shown in local currency
+        gdp_local_series = database.to_local(df_history['gdp'], country_name)
+        treasury_local_series = database.to_local(df_history['treasury'], country_name)
         fig_econ = go.Figure()
-        fig_econ.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['gdp'], mode='lines+markers', name='GDP ($B)', line=dict(color='#00FFCC')))
-        fig_econ.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['treasury'], mode='lines+markers', name='Treasury ($B)', line=dict(color='#FF5E5B')))
+        fig_econ.add_trace(go.Scatter(x=df_history['turn_year'], y=gdp_local_series, mode='lines+markers', name=f"GDP ({currency_unit})", line=dict(color='#00FFCC')))
+        fig_econ.add_trace(go.Scatter(x=df_history['turn_year'], y=treasury_local_series, mode='lines+markers', name=f"Treasury ({currency_unit})", line=dict(color='#FF5E5B')))
         fig_econ.update_layout(title=t(lang, "tab1_chart_title"), template="plotly_dark", hovermode="x unified")
         st.plotly_chart(fig_econ, width='stretch')
 
@@ -445,9 +533,9 @@ def show_dashboard(game_id, lang):
                       help=t(lang, "infra_index_help"))
 
         fig_indices = go.Figure()
-        fig_indices.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['education_index'], mode='lines', name='Education', line=dict(dash='dash', color='#FFD166')))
-        fig_indices.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['health_index'], mode='lines', name='Healthcare', line=dict(dash='dash', color='#06D6A0')))
-        fig_indices.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['infrastructure'], mode='lines', name='Infrastructure', line=dict(dash='dash', color='#118AB2')))
+        fig_indices.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['education_index'], mode='lines+markers', name='Education', line=dict(dash='dash', color='#FFD166')))
+        fig_indices.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['health_index'], mode='lines+markers', name='Healthcare', line=dict(dash='dash', color='#06D6A0')))
+        fig_indices.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['infrastructure'], mode='lines+markers', name='Infrastructure', line=dict(dash='dash', color='#118AB2')))
         fig_indices.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['happiness'], mode='lines+markers', name='Happiness (%)', line=dict(width=3, color='#EF476F')))
         fig_indices.update_layout(title=t(lang, "tab2_chart_title"), template="plotly_dark")
         st.plotly_chart(fig_indices, width='stretch')
@@ -486,10 +574,10 @@ def show_dashboard(game_id, lang):
 
             # Show historical mobility chart
             fig_mobility = go.Figure()
-            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_low'], mode='lines', name=t(lang, "label_low_income"), stackgroup='one', line=dict(color='#FF9F1C')))
-            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_mid'], mode='lines', name=t(lang, "label_mid_income"), stackgroup='one', line=dict(color='#FFD166')))
-            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_high'], mode='lines', name=t(lang, "label_high_income"), stackgroup='one', line=dict(color='#06D6A0')))
-            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_elder'], mode='lines', name=t(lang, "label_pensioners"), stackgroup='one', line=dict(color='#118AB2')))
+            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_low'], mode='lines+markers', name=t(lang, "label_low_income"), stackgroup='one', line=dict(color='#FF9F1C')))
+            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_mid'], mode='lines+markers', name=t(lang, "label_mid_income"), stackgroup='one', line=dict(color='#FFD166')))
+            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_high'], mode='lines+markers', name=t(lang, "label_high_income"), stackgroup='one', line=dict(color='#06D6A0')))
+            fig_mobility.add_trace(go.Scatter(x=df_history['turn_year'], y=df_history['pop_elder'], mode='lines+markers', name=t(lang, "label_pensioners"), stackgroup='one', line=dict(color='#118AB2')))
             fig_mobility.update_layout(title=t(lang, "mobility_chart_title"), template="plotly_dark")
             st.plotly_chart(fig_mobility, width='stretch')
 
@@ -552,7 +640,7 @@ def show_dashboard(game_id, lang):
                         key=f"tier_{position}", label_visibility="collapsed"
                     )
                 with col_c:
-                    tier_info = database.ADVISOR_TIERS[tier_choice]
+                    tier_info = database.get_adjusted_tier_info(game_id, tier_choice)
                     if st.button(t(lang, "recruit_button", cost=fmt_money(tier_info['hire_cost'])), key=f"hire_{position}"):
                         database.hire_advisor(game_id, position, tier_choice)
                         st.rerun()

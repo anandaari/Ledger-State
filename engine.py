@@ -61,7 +61,9 @@ def simulate_turn(game_id, inputs):
     current_year = prev_state['turn_year']
     next_year = current_year + 1
     country_name = database.get_country_name(game_id)
-    
+    diff_settings = database.get_difficulty_settings(game_id)
+
+
     # 1. Gather Inputs (3 tax brackets, 5 budget allocations, min wage, export tariff)
     tax_low = inputs['tax_low']
     tax_mid = inputs['tax_mid']
@@ -73,11 +75,14 @@ def simulate_turn(game_id, inputs):
     b_sec = inputs['budget_security']
     min_wage = inputs['min_wage']          # 0-100 policy intensity, not a literal wage figure
     export_tariff = inputs['export_tariff']  # 0-30% tax on exported goods
+    import_tariff = inputs['import_tariff']  # 0-30% duty on imported goods
 
     total_spending = b_ed + b_hl + b_inf + b_welf + b_sec
     gdp = prev_state['gdp']
-    export_dependency = database.COUNTRY_PRESETS.get(country_name, database.COUNTRY_PRESETS["Indonesia"])['export_dependency']
-    
+    country_preset = database.COUNTRY_PRESETS.get(country_name, database.COUNTRY_PRESETS["Indonesia"])
+    export_dependency = country_preset['export_dependency']
+    import_dependency = country_preset['import_dependency']
+
     # Ratios to GDP
     ed_ratio = b_ed / gdp
     hl_ratio = b_hl / gdp
@@ -196,23 +201,26 @@ def simulate_turn(game_id, inputs):
             active_crisis['current_progress'] = new_progress
 
     # 4. Education, Health, and Infrastructure Indices
-    education_decay = 0.95
-    if active_crisis and active_crisis['name'] == "The Brain Drain Crisis":
-        education_decay = 0.90 # Brain drain increases loss of skill
+    # decay_modifier scales how much of each index is lost every turn if not
+    # reinvested in - Hard makes standing still actively costly, Easy forgives it.
+    decay_mod = diff_settings["decay_modifier"]
+
+    base_education_decay = 0.90 if (active_crisis and active_crisis['name'] == "The Brain Drain Crisis") else 0.95
+    education_decay = 1.0 - (1.0 - base_education_decay) * decay_mod
     education_index = prev_state['education_index'] * education_decay + 100 * ed_ratio
     education_index += cabinet_bonus.get("Menteri Pendidikan", 0.0)
     education_index = max(0.0, min(100.0, education_index))
 
-    health_decay = 0.95
-    if active_crisis and active_crisis['name'] == "The Public Health Epidemic":
-        health_decay = 0.85 # Epidemic decays health faster
+    base_health_decay = 0.85 if (active_crisis and active_crisis['name'] == "The Public Health Epidemic") else 0.95
+    health_decay = 1.0 - (1.0 - base_health_decay) * decay_mod
     health_bonus = perm_mods['health_bonus']
     health_index = prev_state['health_index'] * health_decay + 100 * hl_ratio + health_bonus
     health_index += cabinet_bonus.get("Menteri Kesehatan", 0.0)
     health_index = max(0.0, min(100.0, health_index))
 
     infra_efficiency = perm_mods['infra_efficiency']
-    infrastructure = prev_state['infrastructure'] * 0.93 + 120 * inf_ratio * infra_efficiency
+    infra_decay = 1.0 - (1.0 - 0.93) * decay_mod
+    infrastructure = prev_state['infrastructure'] * infra_decay + 120 * inf_ratio * infra_efficiency
     infrastructure += cabinet_bonus.get("Menteri Infrastruktur", 0.0)
     infrastructure = max(0.0, min(100.0, infrastructure))
     
@@ -225,9 +233,13 @@ def simulate_turn(game_id, inputs):
     growth_base += perm_mods['gdp_growth_mod']
 
     # Minimum wage raises labor costs; export tariffs hurt competitiveness in
-    # proportion to how export-dependent the country's economy is.
+    # proportion to how export-dependent the country's economy is. Import
+    # tariffs also raise costs for domestic producers reliant on imported
+    # inputs, though more mildly than export tariffs hurt competitiveness -
+    # their main bite lands on consumer happiness instead (see below).
     growth_base -= (min_wage / 100.0) * 0.02
     growth_base -= export_dependency * (export_tariff / 100.0) * 0.05
+    growth_base -= import_dependency * (import_tariff / 100.0) * 0.02
 
     if active_crisis and active_crisis['name'] == "The Carbon Transition Tariff":
         growth_base -= 0.04 # Carbon sanctions
@@ -248,8 +260,8 @@ def simulate_turn(game_id, inputs):
     elif rand_val < 0.19: # Cyber attack
         shock_event = "Cyber Ransom Attack"
         shock_value = -0.01
-        # Stolen cash scales with GDP size
-        stolen_cash = round(gdp * 0.03, 1) # 3% of GDP
+        # Stolen cash scales with GDP size and difficulty severity
+        stolen_cash = round(gdp * 0.03 * diff_settings["shock_severity_mult"], 1)
         shock_desc = f"Hackers disrupt digital infrastructure, lowering GDP by -1.0% and stealing ${stolen_cash}B from treasury."
     elif rand_val < 0.24: # Tech boom
         shock_event = "AI Core Breakthrough"
@@ -267,10 +279,12 @@ def simulate_turn(game_id, inputs):
         # Standard slight volatility
         shock_value = random.uniform(-0.005, 0.005)
 
+    shock_value *= diff_settings["shock_severity_mult"]  # Hard hits harder, Easy softens every shock
+
     gdp_growth = growth_base + shock_value
 
     if shock_event == "Bencana Alam":
-        infrastructure = max(0.0, infrastructure - 5.0)  # damage carries into next year's baseline
+        infrastructure = max(0.0, infrastructure - 5.0 * diff_settings["shock_severity_mult"])  # damage carries into next year's baseline
 
     # Cap growth during Infrastructure crisis
     if active_crisis and active_crisis['name'] == "The Infrastructure Bottleneck":
@@ -311,25 +325,29 @@ def simulate_turn(game_id, inputs):
     tariff_revenue = new_gdp * export_dependency * (export_tariff / 100.0) * 0.5
     revenue += tariff_revenue
 
-    # Debt Interest (6% per year on national debt, 9% during a debt crisis)
+    # Import Tariff revenue - scales with how import-dependent the economy is
+    import_tariff_revenue = new_gdp * import_dependency * (import_tariff / 100.0) * 0.5
+    revenue += import_tariff_revenue
+
+    # Debt Interest - rate depends on difficulty, elevated further during a debt crisis
     debt_interest = 0.0
     if prev_state['treasury'] < 0:
-        interest_rate = 0.06
+        interest_rate = diff_settings["interest_rate_normal"]
         if active_crisis and active_crisis['name'] == "Krisis Utang Nasional":
-            interest_rate = 0.09  # credit downgrade
+            interest_rate = diff_settings["interest_rate_crisis"]  # credit downgrade
         debt_interest = abs(prev_state['treasury']) * interest_rate
 
     total_costs = total_spending + debt_interest + cabinet_salaries
 
     if shock_event == "Cyber Ransom Attack":
-        total_costs += round(gdp * 0.03, 1)
+        total_costs += round(gdp * 0.03 * diff_settings["shock_severity_mult"], 1)
     elif shock_event == "Bencana Alam":
-        total_costs += round(gdp * 0.02, 1)  # emergency relief spending
+        total_costs += round(gdp * 0.02 * diff_settings["shock_severity_mult"], 1)  # emergency relief spending
 
     new_treasury = prev_state['treasury'] + revenue - total_costs
 
     if shock_event == "Investasi Asing Mengalir":
-        new_treasury += round(gdp * 0.02, 1)
+        new_treasury += round(gdp * 0.02 * diff_settings["shock_severity_mult"], 1)
     
     # 7. Labor & Welfare Calculations
     new_employment = 0.82 + 0.4 * gdp_growth + 0.05 * (infrastructure / 100.0) - 0.12 * avg_tax_rate
@@ -371,6 +389,7 @@ def simulate_turn(game_id, inputs):
             new_happiness -= 8.0
 
     new_happiness -= corruption_index * 0.05  # public distrust from corruption, up to -5 at 100%
+    new_happiness -= import_dependency * (import_tariff / 100.0) * 15.0  # cost-of-living hit from pricier imported goods
     new_happiness += cabinet_bonus.get("Menteri Sosial", 0.0)
 
     new_happiness = max(0.0, min(100.0, new_happiness))
@@ -399,7 +418,8 @@ def simulate_turn(game_id, inputs):
     divergence = 1.0 - own_party_score  # 0 = loyal to own base, 1 = fully aligned with opposition
 
     prev_opposition = prev_state['opposition_strength']
-    opposition_strength = prev_opposition * 0.85 + divergence * 20.0 + max(0.0, (40.0 - new_happiness)) * 0.5
+    opp_growth_mult = diff_settings["opposition_growth_mult"]
+    opposition_strength = prev_opposition * 0.85 + (divergence * 20.0 + max(0.0, (40.0 - new_happiness)) * 0.5) * opp_growth_mult
     opposition_strength = max(0.0, min(100.0, opposition_strength))
 
     if opposition_strength >= 50.0 and prev_opposition < 50.0:
@@ -422,13 +442,13 @@ def simulate_turn(game_id, inputs):
     years_since_start = next_year - 2026
     if years_since_start > 0 and years_since_start % ELECTION_TERM_YEARS == 0:
         approval_rating = 0.6 * new_happiness + 0.4 * (100.0 - opposition_strength)
-        if approval_rating >= 55.0:
+        if approval_rating >= diff_settings["election_mandate_threshold"]:
             opposition_strength = max(0.0, opposition_strength - 15.0)
             database.log_event(
                 game_id, next_year, 'SOCIAL', "Pemilu: Mandat Kuat",
                 f"Rakyat memberikan mandat kuat untuk melanjutkan pemerintahan {party_name} dengan Approval Rating {approval_rating:.1f}%. Kekuatan oposisi mereda."
             )
-        elif approval_rating >= 40.0:
+        elif approval_rating >= diff_settings["election_narrow_threshold"]:
             database.log_event(
                 game_id, next_year, 'SOCIAL', "Pemilu: Menang Tipis",
                 f"{party_name} kembali terpilih dengan Approval Rating {approval_rating:.1f}%, namun koalisi pemerintahan rapuh dan oposisi tetap kuat."
@@ -553,11 +573,11 @@ def simulate_turn(game_id, inputs):
     if shock_event:
         impacts = {'gdp': shock_value}
         if shock_event == "Cyber Ransom Attack":
-            impacts['treasury'] = -round(gdp * 0.03, 1)
+            impacts['treasury'] = -round(gdp * 0.03 * diff_settings["shock_severity_mult"], 1)
         elif shock_event == "Bencana Alam":
-            impacts['treasury'] = -round(gdp * 0.02, 1)
+            impacts['treasury'] = -round(gdp * 0.02 * diff_settings["shock_severity_mult"], 1)
         elif shock_event == "Investasi Asing Mengalir":
-            impacts['treasury'] = round(gdp * 0.02, 1)
+            impacts['treasury'] = round(gdp * 0.02 * diff_settings["shock_severity_mult"], 1)
         database.log_event(game_id, next_year, 'ECONOMIC', f"EVENT: {shock_event}", shock_desc, impacts)
 
     if new_treasury < 0:
@@ -665,17 +685,21 @@ def simulate_turn(game_id, inputs):
         'budget_welfare': b_welf,
         'budget_security': b_sec,
         'min_wage': min_wage,
-        'export_tariff': export_tariff
+        'export_tariff': export_tariff,
+        'import_tariff': import_tariff
     }
     
     database.save_turn_state(game_id, new_state)
 
-    # 11. Random Narrative Event - occasionally presents a discrete choice
-    # (not a slider) with immediate consequences, resolved on the next
-    # dashboard load before the player can end another fiscal year.
+    # 11. Random Narrative Event or Minister Advice - occasionally presents a
+    # discrete choice (not a slider) with immediate consequences, resolved on
+    # the next dashboard load before the player can end another fiscal year.
+    # Only one pending decision fires per turn.
     if random.random() < 0.12:
         eligible = [key for key, ev in database.RANDOM_EVENTS.items() if ev['condition'](new_state)]
         if eligible:
             database.create_pending_event(game_id, random.choice(eligible), next_year)
+    elif cabinet and random.random() < 0.35:
+        database.create_minister_advice_event(game_id, next_year)
 
     return new_state
