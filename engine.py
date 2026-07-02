@@ -93,6 +93,9 @@ def simulate_turn(game_id, inputs):
     country_preset = database.COUNTRY_PRESETS.get(country_name, database.COUNTRY_PRESETS["Indonesia"])
     export_dependency = country_preset['export_dependency']
     import_dependency = country_preset['import_dependency']
+    trade_specialization = country_preset.get('trade_specialization')
+    export_tariff_bonus = database.TRADE_SPECIALIZATION_BONUS if trade_specialization == 'export' else 1.0
+    import_tariff_bonus = database.TRADE_SPECIALIZATION_BONUS if trade_specialization == 'import' else 1.0
 
     # Ratios to GDP
     ed_ratio = b_ed / gdp
@@ -355,12 +358,14 @@ def simulate_turn(game_id, inputs):
 
     revenue = (rev_low + rev_mid + rev_high) * tax_eff
 
-    # Export Tariff revenue - scales with how export-dependent the economy is
-    tariff_revenue = new_gdp * export_dependency * (export_tariff / 100.0) * 0.125
+    # Export Tariff revenue - scales with how export-dependent the economy is,
+    # plus a specialization bonus for countries whose dominant trade lever is exports.
+    tariff_revenue = new_gdp * export_dependency * (export_tariff / 100.0) * 0.125 * export_tariff_bonus
     revenue += tariff_revenue
 
-    # Import Tariff revenue - scales with how import-dependent the economy is
-    import_tariff_revenue = new_gdp * import_dependency * (import_tariff / 100.0) * 0.125
+    # Import Tariff revenue - scales with how import-dependent the economy is,
+    # plus a specialization bonus for countries whose dominant trade lever is imports.
+    import_tariff_revenue = new_gdp * import_dependency * (import_tariff / 100.0) * 0.125 * import_tariff_bonus
     revenue += import_tariff_revenue
 
     # Debt Interest - rate depends on difficulty and the Sovereign Credit

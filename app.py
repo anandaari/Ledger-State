@@ -81,11 +81,15 @@ def show_start_screen(lang):
         total_starting_pop = preset["pop_low"] + preset["pop_mid"] + preset["pop_high"] + preset["pop_elder"]
 
         treasury_status = t(lang, "surplus_reserves") if preset['treasury'] >= 0 else t(lang, "national_debt")
+        specialization = preset.get('trade_specialization')
+        specialization_label = t(lang, "trade_spec_export") if specialization == 'export' else t(lang, "trade_spec_import")
+        specialization_bonus_pct = (database.TRADE_SPECIALIZATION_BONUS - 1.0) * 100
         st.markdown(f"""
         {t(lang, "country_briefing_title", country=country_name)}
         * {t(lang, "label_starting_population", value=total_starting_pop / 1000000)}
         * {t(lang, "label_starting_gdp", value=database.format_currency(preset['gdp'], country_name))}
         * {t(lang, "label_starting_treasury", value=database.format_currency(preset['treasury'], country_name), status=treasury_status)}
+        * {t(lang, "label_trade_specialization", type=specialization_label, bonus=specialization_bonus_pct)}
         * {t(lang, "label_demographics")}
           * {t(lang, "label_low_income")}: {preset['pop_low'] / total_starting_pop * 100:.1f}%
           * {t(lang, "label_mid_income")}: {preset['pop_mid'] / total_starting_pop * 100:.1f}%
@@ -161,6 +165,87 @@ def render_status_bar(label_text, value_pct, tier):
     </div>
     """, unsafe_allow_html=True)
 
+def check_game_over(state, recent_happiness, recent_opposition, diff_settings, sandbox_mode):
+    """
+    Central game-over rule set, shared by the normal per-render check and the
+    Auto-Advance fast-forward loop so both stay perfectly in sync.
+    recent_happiness/recent_opposition: lists ending with the CURRENT state's
+    value, oldest-to-newest (need >=8 entries for the coup/no-confidence checks).
+    """
+    if state['treasury'] < -(state['gdp'] * 1.5):
+        return True, "bankruptcy"
+
+    if len(recent_happiness) >= 8 and all(h < 20.0 for h in recent_happiness[-8:]):
+        return True, "coup"
+
+    if len(recent_opposition) >= 8 and all(o >= 85.0 for o in recent_opposition[-8:]):
+        return True, "no_confidence"
+
+    quarters_since_start = state['turn_year']
+    if quarters_since_start > 0 and quarters_since_start % engine.ELECTION_TERM_QUARTERS == 0:
+        approval_rating = 0.6 * state['happiness'] + 0.4 * (100.0 - state['opposition_strength'])
+        if approval_rating < diff_settings["election_narrow_threshold"]:
+            return True, "voted_out"
+
+    if state['turn_year'] >= database.TOTAL_GAME_TURNS and not sandbox_mode:
+        return True, "victory"
+
+    return False, None
+
+def compute_budget_projection(game_id, country_name, state, inputs, diff_settings, active_crisis):
+    """
+    Mirrors engine.py simulate_turn's actual revenue/cost formulas so the
+    sidebar's live budget preview (and the Auto-Advance fast-forward loop)
+    matches what simulate_turn will really produce - these constants must
+    stay in sync with simulate_turn's Section 6 (Revenues).
+    """
+    p_low, p_mid, p_high, p_elder = state['pop_low'], state['pop_mid'], state['pop_high'], state['pop_elder']
+    p_total = p_low + p_mid + p_high + p_elder
+
+    total_spending = (inputs['budget_education'] + inputs['budget_health'] + inputs['budget_infrastructure']
+                       + inputs['budget_welfare'] + inputs['budget_security'])
+    cabinet_salaries_total = sum(c['salary'] for c in database.get_cabinet(game_id))
+    debt_interest = abs(state['treasury']) * diff_settings["interest_rate_normal"] if state['treasury'] < 0 else 0.0
+    mandatory_spending = debt_interest + cabinet_salaries_total
+    total_outflow = total_spending + mandatory_spending
+
+    tax_eff = 0.90 + 0.10 * (state['education_index'] / 100.0)
+    if active_crisis and active_crisis['name'] == "The Demographic Cliff":
+        tax_eff *= 0.80
+
+    emp = state['employment_rate']
+    rev_low = state['gdp'] * (p_low / p_total) * inputs['tax_low'] * emp * 0.125
+    rev_mid = state['gdp'] * (p_mid / p_total) * inputs['tax_mid'] * emp * 0.25
+    rev_high = state['gdp'] * (p_high / p_total) * inputs['tax_high'] * emp * 0.625
+    projected_rev = (rev_low + rev_mid + rev_high) * tax_eff
+
+    country_preset = database.COUNTRY_PRESETS[country_name]
+    trade_specialization = country_preset.get('trade_specialization')
+    export_bonus = database.TRADE_SPECIALIZATION_BONUS if trade_specialization == 'export' else 1.0
+    import_bonus = database.TRADE_SPECIALIZATION_BONUS if trade_specialization == 'import' else 1.0
+    projected_rev += state['gdp'] * country_preset['export_dependency'] * (inputs['export_tariff'] / 100.0) * 0.125 * export_bonus
+    projected_rev += state['gdp'] * country_preset['import_dependency'] * (inputs['import_tariff'] / 100.0) * 0.125 * import_bonus
+
+    projected_net = projected_rev - total_outflow
+    deficit_pct_of_gdp = max(0.0, -projected_net / state['gdp'] * 100.0)
+    deficit_ceiling = diff_settings["deficit_ceiling_pct"]
+
+    effective_opposition = max(0.0, state['opposition_strength'] - state['coalition_support'] * 0.3)
+    deficit_exceeded = deficit_pct_of_gdp > deficit_ceiling
+    opposition_contests = effective_opposition >= database.BUDGET_OPPOSITION_CONTEST_THRESHOLD
+
+    return {
+        'total_spending': total_spending,
+        'mandatory_spending': mandatory_spending,
+        'total_outflow': total_outflow,
+        'projected_rev': projected_rev,
+        'projected_net': projected_net,
+        'deficit_pct_of_gdp': deficit_pct_of_gdp,
+        'deficit_ceiling': deficit_ceiling,
+        'triggers_crisis': deficit_exceeded or opposition_contests,
+        'crisis_reason': 'deficit' if deficit_exceeded else ('opposition' if opposition_contests else None),
+    }
+
 def render_event_entry(ev, lang, show_year=True, crisis_requirements=None):
     cal_year, cal_quarter = database.get_calendar_label(ev['turn_year'])
     title = ev['title']
@@ -217,51 +302,17 @@ def show_dashboard(game_id, lang):
     p_elder = latest_state['pop_elder']
     p_total = p_low + p_mid + p_high + p_elder
 
-    # 2. Check Game Over / Win Conditions
-    is_game_over = False
-    game_over_reason = ""
-
-    # Condition A: Sovereign Default (Debt > 150% of GDP)
-    if latest_state['treasury'] < -(latest_state['gdp'] * 1.5):
-        is_game_over = True
-        game_over_reason = "bankruptcy"
-
-    # Condition B: Coup / Revolution (Happiness drops below 20% for 8
-    # straight quarters = 2 years, same real-time bar as when a turn was a
-    # full year)
-    if len(df_history) >= 8:
-        last_two_years_happiness = df_history['happiness'].iloc[-8:].values
-        if all(h < 20.0 for h in last_two_years_happiness):
-            is_game_over = True
-            game_over_reason = "coup"
-
-    # Condition C: Vote of No Confidence (Opposition Strength >= 85% for 8
-    # straight quarters = 2 years)
-    if len(df_history) >= 8:
-        last_two_years_opposition = df_history['opposition_strength'].iloc[-8:].values
-        if all(o >= 85.0 for o in last_two_years_opposition):
-            is_game_over = True
-            game_over_reason = "no_confidence"
-
-    # Condition D: Election Defeat (every 20 turns / 5 years, Approval Rating
-    # below the difficulty's narrow-win threshold). turn_year is a 0-based
-    # turn index, so no calendar offset is needed.
+    # 2. Check Game Over / Win Conditions (shared with the Auto-Advance
+    # fast-forward loop via check_game_over so both stay in sync)
     diff_settings = database.get_difficulty_settings(game_id)
     debt_to_gdp_pct = (latest_state['treasury'] / latest_state['gdp']) * 100.0
     rating_info = database.get_credit_rating(debt_to_gdp_pct, latest_state['corruption_index'])
-    quarters_since_start = latest_state['turn_year']
-    if quarters_since_start > 0 and quarters_since_start % engine.ELECTION_TERM_QUARTERS == 0:
-        approval_rating = 0.6 * latest_state['happiness'] + 0.4 * (100.0 - latest_state['opposition_strength'])
-        if approval_rating < diff_settings["election_narrow_threshold"]:
-            is_game_over = True
-            game_over_reason = "voted_out"
-
-    # Condition E: Completed 50 Years (200 quarterly turns) - skipped once
-    # the player has opted into Sandbox Mode (unlimited turns)
     sandbox_mode = database.get_sandbox_mode(game_id)
-    if latest_state['turn_year'] >= database.TOTAL_GAME_TURNS and not sandbox_mode:
-        is_game_over = True
-        game_over_reason = "victory"
+
+    is_game_over, game_over_reason = check_game_over(
+        latest_state, df_history['happiness'].tolist(), df_history['opposition_strength'].tolist(),
+        diff_settings, sandbox_mode
+    )
 
     if is_game_over:
         show_game_over_screen(latest_state, df_history, game_over_reason, country_name, game_id, lang)
@@ -286,33 +337,58 @@ def show_dashboard(game_id, lang):
     crisis_requirements = {c['name']: c['requirement_desc'] for c in crises}
 
     pending_event = database.get_pending_event(game_id)
-    if pending_event:
-        st.sidebar.warning(t(lang, "pending_event_sidebar_warning"))
-
     budget_crisis = st.session_state.get(f'budget_crisis_{game_id}')
-    if budget_crisis:
-        st.sidebar.warning(t(lang, "budget_crisis_sidebar_warning"))
-
     form_locked = bool(pending_event) or bool(budget_crisis)
+
+    # Consolidated attention banner - previously pending_event, budget_crisis,
+    # and the active crisis were flagged in separate scattered spots (or not
+    # flagged in the sidebar at all); one glance here now covers everything
+    # that needs the player's attention this turn.
+    attention_items = []
+    if pending_event:
+        attention_items.append(t(lang, "attention_pending_event"))
+    if budget_crisis:
+        attention_items.append(t(lang, "attention_budget_crisis"))
+    if active_crisis:
+        attention_items.append(t(lang, "attention_active_crisis", name=active_crisis['name']))
+    if attention_items:
+        st.sidebar.warning(t(lang, "attention_banner_header") + "\n" + "\n".join(f"- {item}" for item in attention_items))
 
     # Football-Manager-style flow: ending a fiscal year doesn't just silently
     # jump to the next dashboard - a "Year in Review" popup summarizes what
     # happened first, and if a narrative decision fired that same turn, a
-    # second blocking popup demands a choice before play can continue.
+    # second blocking popup demands a choice before play can continue. The
+    # review is stored as a (from_turn, to_turn) range so Auto-Advance can
+    # fast-forward several quarters and still show everything that happened.
     review_year_key = f'year_review_{game_id}'
-    pending_review_year = st.session_state.get(review_year_key)
+    pending_review_range = st.session_state.get(review_year_key)
 
-    if pending_review_year:
-        review_events = database.get_events(game_id, turn_year=pending_review_year)
-        review_cal_year, review_cal_quarter = database.get_calendar_label(pending_review_year)
+    if pending_review_range:
+        review_from, review_to = pending_review_range
+        is_multi_turn = review_to > review_from
+        if is_multi_turn:
+            review_events = database.get_events(game_id, turn_year_from=review_from, turn_year_to=review_to)
+        else:
+            review_events = database.get_events(game_id, turn_year=review_from)
+        review_cal_year_from, review_cal_quarter_from = database.get_calendar_label(review_from)
 
-        @st.dialog(t(lang, "year_review_title", year=review_cal_year, quarter=review_cal_quarter), dismissible=False)
+        if is_multi_turn:
+            review_cal_year_to, review_cal_quarter_to = database.get_calendar_label(review_to)
+            dialog_title_text = t(
+                lang, "year_review_title_range",
+                year_from=review_cal_year_from, quarter_from=review_cal_quarter_from,
+                year_to=review_cal_year_to, quarter_to=review_cal_quarter_to
+            )
+        else:
+            dialog_title_text = t(lang, "year_review_title", year=review_cal_year_from, quarter=review_cal_quarter_from)
+
+        @st.dialog(dialog_title_text, dismissible=False)
         def _year_review_dialog():
             if not review_events:
                 st.write(t(lang, "no_events_message"))
             else:
                 for ev in review_events:
-                    render_event_entry(ev, lang, show_year=False, crisis_requirements=crisis_requirements)
+                    render_event_entry(ev, lang, show_year=is_multi_turn, crisis_requirements=crisis_requirements)
             st.divider()
             if st.button(t(lang, "continue_button"), type="primary", width="stretch", key="year_review_continue"):
                 del st.session_state[review_year_key]
@@ -388,6 +464,11 @@ def show_dashboard(game_id, lang):
             help=t(lang, "import_tariff_help")
         )
 
+        country_specialization = database.COUNTRY_PRESETS.get(country_name, {}).get('trade_specialization')
+        spec_label = t(lang, "trade_spec_export") if country_specialization == 'export' else t(lang, "trade_spec_import")
+        specialization_bonus_pct = (database.TRADE_SPECIALIZATION_BONUS - 1.0) * 100
+        st.caption(t(lang, "trade_specialization_caption", country=country_name, type=spec_label, bonus=specialization_bonus_pct))
+
         currency_unit = database.currency_unit_suffix(country_name)
         st.write(f"{t(lang, 'spending_header')} ({currency_unit})")
         # Range is 0 to GDP/8 for each allocation (a quarterly budget capped
@@ -419,46 +500,34 @@ def show_dashboard(game_id, lang):
         b_welf = database.from_local(b_welf_local, country_name)
         b_sec = database.from_local(b_sec_local, country_name)
 
-        # Real-time balances
-        total_spending = b_ed + b_hl + b_inf + b_welf + b_sec
-        cabinet_salaries_total = sum(c['salary'] for c in database.get_cabinet(game_id))
-        debt_interest = abs(latest_state['treasury']) * diff_settings["interest_rate_normal"] if latest_state['treasury'] < 0 else 0.0
-        mandatory_spending = debt_interest + cabinet_salaries_total
-        total_outflow = total_spending + mandatory_spending
-
-        # Approximate Revenue calculation
-        tax_eff = 0.90 + 0.10 * (latest_state['education_index'] / 100.0)
-        if active_crisis and active_crisis['name'] == "The Demographic Cliff":
-            tax_eff *= 0.80
-
-        emp = latest_state['employment_rate']
-        rev_low = latest_state['gdp'] * (p_low / p_total) * tax_low * emp * 0.5
-        rev_mid = latest_state['gdp'] * (p_mid / p_total) * tax_mid * emp * 1.0
-        rev_high = latest_state['gdp'] * (p_high / p_total) * tax_high * emp * 2.5
-        projected_rev = (rev_low + rev_mid + rev_high) * tax_eff
-
-        export_dependency = database.COUNTRY_PRESETS[country_name]['export_dependency']
-        import_dependency = database.COUNTRY_PRESETS[country_name]['import_dependency']
-        projected_rev += latest_state['gdp'] * export_dependency * (export_tariff / 100.0) * 0.5
-        projected_rev += latest_state['gdp'] * import_dependency * (import_tariff / 100.0) * 0.5
-
-        projected_net = projected_rev - total_outflow
+        current_inputs = {
+            'tax_low': tax_low,
+            'tax_mid': tax_mid,
+            'tax_high': tax_high,
+            'budget_education': b_ed,
+            'budget_health': b_hl,
+            'budget_infrastructure': b_inf,
+            'budget_welfare': b_welf,
+            'budget_security': b_sec,
+            'min_wage': min_wage,
+            'export_tariff': export_tariff,
+            'import_tariff': import_tariff
+        }
+        projection = compute_budget_projection(game_id, country_name, latest_state, current_inputs, diff_settings, active_crisis)
 
         st.write("---")
         st.caption(t(lang, "mandatory_vs_discretionary",
-                     mandatory=database.format_currency(mandatory_spending, country_name, decimals=2),
-                     discretionary=database.format_currency(total_spending, country_name, decimals=2)))
-        st.write(t(lang, "projected_inflow", value=database.format_currency(projected_rev, country_name, decimals=2)))
-        st.write(t(lang, "projected_outflow", value=database.format_currency(total_outflow, country_name, decimals=2)))
+                     mandatory=database.format_currency(projection['mandatory_spending'], country_name, decimals=2),
+                     discretionary=database.format_currency(projection['total_spending'], country_name, decimals=2)))
+        st.write(t(lang, "projected_inflow", value=database.format_currency(projection['projected_rev'], country_name, decimals=2)))
+        st.write(t(lang, "projected_outflow", value=database.format_currency(projection['total_outflow'], country_name, decimals=2)))
 
-        if projected_net >= 0:
-            st.success(t(lang, "surplus_label", value=database.format_currency(projected_net, country_name, decimals=2)))
+        if projection['projected_net'] >= 0:
+            st.success(t(lang, "surplus_label", value=database.format_currency(projection['projected_net'], country_name, decimals=2)))
         else:
-            st.error(t(lang, "deficit_label", value=database.format_currency(abs(projected_net), country_name, decimals=2)))
+            st.error(t(lang, "deficit_label", value=database.format_currency(abs(projection['projected_net']), country_name, decimals=2)))
 
-        deficit_pct_of_gdp = max(0.0, -projected_net / latest_state['gdp'] * 100.0)
-        deficit_ceiling = diff_settings["deficit_ceiling_pct"]
-        st.caption(t(lang, "deficit_ceiling_note", value=deficit_ceiling))
+        st.caption(t(lang, "deficit_ceiling_note", value=projection['deficit_ceiling']))
 
         if form_locked:
             st.warning(t(lang, "pending_event_form_warning"))
@@ -468,89 +537,112 @@ def show_dashboard(game_id, lang):
         )
 
         if submit_btn and not form_locked:
-            inputs = {
-                'tax_low': tax_low,
-                'tax_mid': tax_mid,
-                'tax_high': tax_high,
-                'budget_education': b_ed,
-                'budget_health': b_hl,
-                'budget_infrastructure': b_inf,
-                'budget_welfare': b_welf,
-                'budget_security': b_sec,
-                'min_wage': min_wage,
-                'export_tariff': export_tariff,
-                'import_tariff': import_tariff
-            }
-            opposition_strength_now = latest_state['opposition_strength']
-            coalition_support_now = latest_state['coalition_support']
-            effective_opposition = max(0.0, opposition_strength_now - coalition_support_now * 0.3)
-            deficit_exceeded = deficit_pct_of_gdp > deficit_ceiling
-            opposition_contests = effective_opposition >= database.BUDGET_OPPOSITION_CONTEST_THRESHOLD
-            if deficit_exceeded or opposition_contests:
+            if projection['triggers_crisis']:
                 st.session_state[f'budget_crisis_{game_id}'] = {
-                    'inputs': inputs,
-                    'reason': 'deficit' if deficit_exceeded else 'opposition',
-                    'deficit_pct': deficit_pct_of_gdp,
-                    'ceiling': deficit_ceiling,
+                    'inputs': current_inputs,
+                    'reason': projection['crisis_reason'],
+                    'deficit_pct': projection['deficit_pct_of_gdp'],
+                    'ceiling': projection['deficit_ceiling'],
                 }
             else:
-                new_state = engine.simulate_turn(game_id, inputs)
-                st.session_state[f'year_review_{game_id}'] = new_state['turn_year']
+                new_state = engine.simulate_turn(game_id, current_inputs)
+                st.session_state[f'year_review_{game_id}'] = (new_state['turn_year'], new_state['turn_year'])
             st.rerun()
 
-    st.sidebar.divider()
-    st.sidebar.caption(t(lang, "bribe_caption"))
-    bribe_key = f"bribed_{game_id}_{latest_state['turn_year']}"
-    already_bribed = st.session_state.get(bribe_key, False)
-    if st.sidebar.button(t(lang, "bribe_button", amount=fmt_money(100)), disabled=already_bribed):
-        database.apply_bribe(game_id)
-        st.session_state[bribe_key] = True
+    # Auto-Advance: quarterly turns mean up to 200 manual clicks for a full
+    # 50-year term - this repeats the CURRENT form's policy for N quarters in
+    # a row, stopping early (and letting the normal blocking dialogs take
+    # over) the moment anything needs the player's attention, so it never
+    # silently skips a decision.
+    st.sidebar.caption(t(lang, "auto_advance_caption"))
+    auto_advance_n = st.sidebar.select_slider(t(lang, "auto_advance_quarters_label"), options=[1, 4, 8, 12, 20], value=4)
+    if st.sidebar.button(t(lang, "auto_advance_button", n=auto_advance_n), disabled=form_locked):
+        recent_happiness = df_history['happiness'].tolist()
+        recent_opposition = df_history['opposition_strength'].tolist()
+        current_state = latest_state
+        start_turn = current_state['turn_year']
+        turns_done = 0
+        for _ in range(auto_advance_n):
+            crises_now = database.get_crises(game_id)
+            active_crisis_now = next((c for c in crises_now if c['status'] == 'ACTIVE'), None)
+            step_projection = compute_budget_projection(game_id, country_name, current_state, current_inputs, diff_settings, active_crisis_now)
+            if step_projection['triggers_crisis']:
+                st.session_state[f'budget_crisis_{game_id}'] = {
+                    'inputs': current_inputs,
+                    'reason': step_projection['crisis_reason'],
+                    'deficit_pct': step_projection['deficit_pct_of_gdp'],
+                    'ceiling': step_projection['deficit_ceiling'],
+                }
+                break
+            new_state = engine.simulate_turn(game_id, current_inputs)
+            turns_done += 1
+            current_state = new_state
+            recent_happiness.append(new_state['happiness'])
+            recent_opposition.append(new_state['opposition_strength'])
+            is_over, _ = check_game_over(new_state, recent_happiness, recent_opposition, diff_settings, sandbox_mode)
+            if is_over or database.get_pending_event(game_id):
+                break
+        if turns_done > 0:
+            st.session_state[f'year_review_{game_id}'] = (start_turn + 1, current_state['turn_year'])
         st.rerun()
-    if already_bribed:
-        st.sidebar.caption(t(lang, "bribe_done_caption"))
 
     st.sidebar.divider()
-    st.sidebar.write(t(lang, "diplomacy_header"))
+    # Collapsed by default - bribery/diplomacy/coalition actions are touched
+    # far less often than the budget form, so hiding them behind one label
+    # cuts a big chunk of permanent sidebar scroll without losing any power.
+    with st.sidebar.expander(t(lang, "political_actions_expander_label"), expanded=False):
+        st.caption(t(lang, "bribe_caption"))
+        bribe_key = f"bribed_{game_id}_{latest_state['turn_year']}"
+        already_bribed = st.session_state.get(bribe_key, False)
+        if st.button(t(lang, "bribe_button", amount=fmt_money(100)), disabled=already_bribed):
+            database.apply_bribe(game_id)
+            st.session_state[bribe_key] = True
+            st.rerun()
+        if already_bribed:
+            st.caption(t(lang, "bribe_done_caption"))
 
-    # Sovereign Bond - size capped by the current Credit Rating
-    bond_cap_usd = rating_info['bond_cap_pct'] * latest_state['gdp']
-    bond_cap_local = database.to_local(bond_cap_usd, country_name)
-    st.sidebar.caption(t(lang, "credit_rating_caption", rating=rating_info['letter'], cap=fmt_money(bond_cap_usd)))
-    bond_key = f"bonded_{game_id}_{latest_state['turn_year']}"
-    already_bonded = st.session_state.get(bond_key, False)
-    bond_amount_local = st.sidebar.number_input(
-        t(lang, "bond_amount_label"), min_value=0.0, max_value=max(0.01, bond_cap_local), value=0.0,
-        step=max(0.01, database.to_local(1.0, country_name)), disabled=already_bonded or bond_cap_local <= 0
-    )
-    if st.sidebar.button(t(lang, "issue_bond_button"), disabled=already_bonded or bond_amount_local <= 0):
-        bond_amount_usd = database.from_local(bond_amount_local, country_name)
-        database.apply_bond_issuance(game_id, bond_amount_usd)
-        st.session_state[bond_key] = True
-        st.rerun()
-    if already_bonded:
-        st.sidebar.caption(t(lang, "bond_done_caption"))
+        st.divider()
+        st.write(t(lang, "diplomacy_header"))
 
-    # Trade Agreement - raises Foreign Relations
-    st.sidebar.caption(t(lang, "trade_agreement_caption"))
-    trade_key = f"traded_{game_id}_{latest_state['turn_year']}"
-    already_traded = st.session_state.get(trade_key, False)
-    if st.sidebar.button(t(lang, "trade_agreement_button", amount=fmt_money(15)), disabled=already_traded):
-        database.apply_trade_agreement(game_id)
-        st.session_state[trade_key] = True
-        st.rerun()
-    if already_traded:
-        st.sidebar.caption(t(lang, "trade_agreement_done_caption"))
+        # Sovereign Bond - size capped by the current Credit Rating
+        bond_cap_usd = rating_info['bond_cap_pct'] * latest_state['gdp']
+        bond_cap_local = database.to_local(bond_cap_usd, country_name)
+        st.caption(t(lang, "credit_rating_caption", rating=rating_info['letter'], cap=fmt_money(bond_cap_usd)))
+        bond_key = f"bonded_{game_id}_{latest_state['turn_year']}"
+        already_bonded = st.session_state.get(bond_key, False)
+        bond_amount_local = st.number_input(
+            t(lang, "bond_amount_label"), min_value=0.0, max_value=max(0.01, bond_cap_local), value=0.0,
+            step=max(0.01, database.to_local(1.0, country_name)), disabled=already_bonded or bond_cap_local <= 0
+        )
+        if st.button(t(lang, "issue_bond_button"), disabled=already_bonded or bond_amount_local <= 0):
+            bond_amount_usd = database.from_local(bond_amount_local, country_name)
+            database.apply_bond_issuance(game_id, bond_amount_usd)
+            st.session_state[bond_key] = True
+            st.rerun()
+        if already_bonded:
+            st.caption(t(lang, "bond_done_caption"))
 
-    # Coalition Negotiation - raises Coalition Support
-    st.sidebar.caption(t(lang, "coalition_caption"))
-    coalition_key = f"coalition_{game_id}_{latest_state['turn_year']}"
-    already_coalition = st.session_state.get(coalition_key, False)
-    if st.sidebar.button(t(lang, "coalition_button", amount=fmt_money(25)), disabled=already_coalition):
-        database.apply_coalition_negotiation(game_id)
-        st.session_state[coalition_key] = True
-        st.rerun()
-    if already_coalition:
-        st.sidebar.caption(t(lang, "coalition_done_caption"))
+        # Trade Agreement - raises Foreign Relations
+        st.caption(t(lang, "trade_agreement_caption"))
+        trade_key = f"traded_{game_id}_{latest_state['turn_year']}"
+        already_traded = st.session_state.get(trade_key, False)
+        if st.button(t(lang, "trade_agreement_button", amount=fmt_money(15)), disabled=already_traded):
+            database.apply_trade_agreement(game_id)
+            st.session_state[trade_key] = True
+            st.rerun()
+        if already_traded:
+            st.caption(t(lang, "trade_agreement_done_caption"))
+
+        # Coalition Negotiation - raises Coalition Support
+        st.caption(t(lang, "coalition_caption"))
+        coalition_key = f"coalition_{game_id}_{latest_state['turn_year']}"
+        already_coalition = st.session_state.get(coalition_key, False)
+        if st.button(t(lang, "coalition_button", amount=fmt_money(25)), disabled=already_coalition):
+            database.apply_coalition_negotiation(game_id)
+            st.session_state[coalition_key] = True
+            st.rerun()
+        if already_coalition:
+            st.caption(t(lang, "coalition_done_caption"))
 
     st.sidebar.divider()
     if st.sidebar.button(t(lang, "abandon_button"), type="secondary"):
@@ -581,7 +673,7 @@ def show_dashboard(game_id, lang):
             if st.button(t(lang, "force_decree_button"), key="budget_crisis_force", type="primary", width="stretch"):
                 new_state = engine.simulate_turn(game_id, budget_crisis['inputs'])
                 database.apply_forced_budget_penalty(game_id)
-                st.session_state[f'year_review_{game_id}'] = new_state['turn_year']
+                st.session_state[f'year_review_{game_id}'] = (new_state['turn_year'], new_state['turn_year'])
                 del st.session_state[f'budget_crisis_{game_id}']
                 st.rerun()
             st.caption(t(lang, "force_decree_caption"))
@@ -660,8 +752,19 @@ def show_dashboard(game_id, lang):
             st.metric(t(lang, "monitor_crime_label"), f"{crime_pct:.1f}%", delta=f"{crime_delta:+.1f}%", delta_color="inverse",
                        help=t(lang, "monitor_crime_help"))
         with col_m3:
-            st.metric(t(lang, "monitor_debt_gdp_label"), f"{debt_to_gdp_pct:.1f}%", delta=f"{debt_to_gdp_delta:+.1f}%",
-                       help=t(lang, "monitor_debt_gdp_help"))
+            # A positive treasury/GDP ratio is a SURPLUS, not debt - showing
+            # it under a fixed "Debt/GDP" label with an unsigned number read
+            # as "debt going up" even while the country was actually running
+            # a growing surplus. Label, help text, and the sign now follow
+            # the actual treasury position.
+            if latest_state['treasury'] >= 0:
+                debt_gdp_label = t(lang, "monitor_surplus_gdp_label")
+                debt_gdp_help = t(lang, "monitor_surplus_gdp_help")
+            else:
+                debt_gdp_label = t(lang, "monitor_debt_gdp_label")
+                debt_gdp_help = t(lang, "monitor_debt_gdp_help")
+            st.metric(debt_gdp_label, f"{debt_to_gdp_pct:+.1f}%", delta=f"{debt_to_gdp_delta:+.1f}%",
+                       help=debt_gdp_help)
         with col_m4:
             st.metric(t(lang, "monitor_approval_label"), f"{approval_rating:.1f}%", delta=f"{approval_delta:+.1f}%",
                        help=t(lang, "monitor_approval_help", mandate=diff_settings["election_mandate_threshold"], narrow=diff_settings["election_narrow_threshold"]))

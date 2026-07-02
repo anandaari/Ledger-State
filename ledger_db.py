@@ -51,6 +51,14 @@ def currency_unit_suffix(country_name):
     info = CURRENCY_INFO.get(country_name, CURRENCY_INFO["United States"])
     return f"{info['symbol']} {info['unit_label']}"
 
+# Each country's dominant trade lever (whichever dependency is higher) earns
+# a tariff-revenue bonus on that specific lever via TRADE_SPECIALIZATION_BONUS
+# - a country "strong" in imports (like Indonesia) gets extra revenue when
+# the player raises Import Tariff specifically, on top of the revenue it
+# already collects from being import-dependent. This only touches the
+# revenue side, not the GDP-growth/happiness costs of that tariff.
+TRADE_SPECIALIZATION_BONUS = 1.25
+
 COUNTRY_PRESETS = {
     "Singapore": {
         "pop_low": 900000,      # 15% of 6.0M
@@ -64,6 +72,7 @@ COUNTRY_PRESETS = {
         "tax_high": 0.22,
         "export_dependency": 0.70,  # highly trade-dependent economy
         "import_dependency": 0.65,  # trade hub, imports almost everything it consumes
+        "trade_specialization": "export",  # entrepot trade hub, export-led
     },
     "Indonesia": {
         "pop_low": 140000000,   # 50% of 280M
@@ -77,6 +86,7 @@ COUNTRY_PRESETS = {
         "tax_high": 0.30,
         "export_dependency": 0.25,
         "import_dependency": 0.30,
+        "trade_specialization": "import",  # large consumer market, import-led
     },
     "United States": {
         "pop_low": 85000000,    # 25% of 340M
@@ -90,6 +100,7 @@ COUNTRY_PRESETS = {
         "tax_high": 0.37,
         "export_dependency": 0.12,  # relatively closed, consumption-driven economy
         "import_dependency": 0.15,
+        "trade_specialization": "import",  # consumption-driven economy, import-led
     },
     "Japan": {
         "pop_low": 24800000,    # 20% of 124M
@@ -103,6 +114,7 @@ COUNTRY_PRESETS = {
         "tax_high": 0.45,
         "export_dependency": 0.35,
         "import_dependency": 0.40,  # heavily reliant on imported energy & raw materials
+        "trade_specialization": "import",  # reliant on imported energy & raw materials
     },
     "Germany": {
         "pop_low": 12600000,    # 15% of 84M
@@ -116,6 +128,7 @@ COUNTRY_PRESETS = {
         "tax_high": 0.42,
         "export_dependency": 0.50,  # major manufacturing exporter
         "import_dependency": 0.45,  # deeply embedded in EU supply chains
+        "trade_specialization": "export",  # major manufacturing exporter
     }
 }
 
@@ -865,16 +878,23 @@ def log_event(game_id, turn_year, event_type, title, description, impact_dict=No
     conn.commit()
     conn.close()
 
-def get_events(game_id, turn_year=None, db_path=DB_PATH):
+def get_events(game_id, turn_year=None, turn_year_from=None, turn_year_to=None, db_path=DB_PATH):
     conn = get_connection(db_path)
     cursor = conn.cursor()
-    if turn_year:
+    if turn_year is not None:
         cursor.execute("""
             SELECT event_id, turn_year, event_type, title, description, impact_json
             FROM turn_events
             WHERE game_id = ? AND turn_year = ?
             ORDER BY event_id DESC
         """, (game_id, turn_year))
+    elif turn_year_from is not None and turn_year_to is not None:
+        cursor.execute("""
+            SELECT event_id, turn_year, event_type, title, description, impact_json
+            FROM turn_events
+            WHERE game_id = ? AND turn_year BETWEEN ? AND ?
+            ORDER BY turn_year ASC, event_id DESC
+        """, (game_id, turn_year_from, turn_year_to))
     else:
         cursor.execute("""
             SELECT event_id, turn_year, event_type, title, description, impact_json
