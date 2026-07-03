@@ -12,6 +12,17 @@ import ledger_db as database
 ELECTION_TERM_QUARTERS = 20  # 5 years
 CRISIS_COOLDOWN_QUARTERS = 12  # 3 years
 
+# Relative income weights used to approximate a Gini-like Inequality Index
+# from population shares alone (the game has no explicit per-capita income
+# figure) - High-income citizens are modeled as earning roughly 9x a
+# Low-income citizen, Mid 3x, Elder (mostly pension/savings income) 1.5x.
+INCOME_WEIGHTS = {'low': 1.0, 'mid': 3.0, 'high': 9.0, 'elder': 1.5}
+
+# Maps a Sovereign Credit Rating letter (see database.get_credit_rating) to a
+# 0-100 score, used as the largest single input to the Investor Confidence
+# Index below.
+RATING_SCORES = {"AAA": 100, "AA": 90, "A": 80, "BBB": 65, "BB": 50, "B": 35, "D": 10}
+
 def get_permanent_modifiers(game_id):
     """
     Scans historical crises to apply permanent rewards/penalties to GDP growth and other factors.
@@ -101,6 +112,8 @@ def simulate_turn(game_id, inputs):
     ed_ratio = b_ed / gdp
     hl_ratio = b_hl / gdp
     inf_ratio = b_inf / gdp
+    welf_ratio = b_welf / gdp
+    sec_ratio = b_sec / gdp
 
     # Demographic state
     p_low = prev_state['pop_low']
@@ -251,6 +264,22 @@ def simulate_turn(game_id, inputs):
     infrastructure += cabinet_bonus.get("Menteri Infrastruktur", 0.0)
     infrastructure = max(0.0, min(100.0, infrastructure))
 
+    # Welfare Index and Public Safety Index - same persistent decay+injection
+    # shape as Education/Health/Infrastructure above, so Welfare and Security
+    # spending (previously only felt instantly through happiness/crime_rate)
+    # also build up a trackable, decaying institutional quality level. Purely
+    # additive monitoring stats - they don't feed back into any other formula,
+    # so existing happiness/crime_rate/opposition balance is unchanged.
+    base_welfare_decay = 0.90 if (active_crisis and active_crisis['name'] == "The Demographic Cliff") else 0.95
+    welfare_decay = (1.0 - (1.0 - base_welfare_decay) * decay_mod) ** 0.25
+    welfare_index = prev_state['welfare_index'] * welfare_decay + 100 * welf_ratio
+    welfare_index = max(0.0, min(100.0, welfare_index))
+
+    base_safety_decay = 0.90 if (active_crisis and active_crisis['name'] == "Gelombang Kriminalitas") else 0.95
+    safety_decay = (1.0 - (1.0 - base_safety_decay) * decay_mod) ** 0.25
+    public_safety_index = prev_state['public_safety_index'] * safety_decay + 100 * sec_ratio
+    public_safety_index = max(0.0, min(100.0, public_safety_index))
+
     # 5. Economic simulation
     # Calculate average tax rate weighted by population
     avg_tax_rate = r_low * tax_low + r_mid * tax_mid + r_high * tax_high
@@ -267,6 +296,11 @@ def simulate_turn(game_id, inputs):
     growth_base -= (min_wage / 100.0) * 0.005
     growth_base -= export_dependency * (export_tariff / 100.0) * 0.0125
     growth_base -= import_dependency * (import_tariff / 100.0) * 0.005
+
+    # Stagflation drag: high Inflation from LAST quarter chokes THIS quarter's
+    # growth (uses last quarter's value, not this quarter's, since this
+    # quarter's inflation isn't computed until after gdp_growth is known below).
+    growth_base -= max(0.0, prev_state['inflation_rate'] - 0.02) * 0.30
 
     # Foreign Relations: strong diplomatic standing (>50, neutral) gives a
     # small GDP growth bonus from smoother trade access; collapsed relations
@@ -328,6 +362,39 @@ def simulate_turn(game_id, inputs):
     new_gdp = gdp * (1.0 + gdp_growth)
     new_gdp = max(10.0, new_gdp)
 
+    # 5a. Inflation Rate - mean-reverts toward a ~2%/year baseline (0.005 per
+    # quarter), pushed up by an overheating economy, deep sovereign debt
+    # (monetization pressure), a fast-rising minimum wage, and import tariffs
+    # (cost-push via pricier imported goods). Feeds back into next quarter's
+    # GDP growth (stagflation, above) and this quarter's happiness (below).
+    prev_inflation = prev_state['inflation_rate']
+    debt_to_gdp_pct = (prev_state['treasury'] / gdp) * 100.0
+    debt_monetization_pressure = max(0.0, -debt_to_gdp_pct) / 100.0
+    overheat_pressure = max(0.0, (gdp_growth * 4.0) - 0.05) * 0.15
+    wage_push = max(0.0, min_wage - prev_state['min_wage']) / 100.0 * 0.05
+    import_cost_push = import_dependency * (import_tariff / 100.0) * 0.05
+    inflation_noise = random.uniform(-0.001, 0.001) * diff_settings["shock_severity_mult"]
+    new_inflation = prev_inflation + (0.005 - prev_inflation) * 0.15 \
+        + overheat_pressure + debt_monetization_pressure * 0.015 + wage_push + import_cost_push + inflation_noise
+    # Gubernur Bank Sentral's bonus (0.5/1.0/1.75 for Muda/Berpengalaman/Pakar,
+    # same tier scale as every other minister) is divided down to inflation's
+    # much smaller 0-0.06 scale - /500 gives a Pakar governor roughly -0.35pp
+    # per quarter, enough to meaningfully tame inflation without being an
+    # outright "off switch" for the whole mechanic.
+    new_inflation -= cabinet_bonus.get("Gubernur Bank Sentral", 0.0) / 500.0
+    new_inflation = max(-0.01, min(0.06, new_inflation))
+
+    if new_inflation >= 0.02 > prev_inflation:
+        database.log_event(
+            game_id, next_year, 'ECONOMIC', "Inflasi Tinggi",
+            f"Inflasi kuartal ini mencapai {new_inflation * 100:.1f}%, menekan daya beli masyarakat secara signifikan."
+        )
+    if new_inflation < 0.0 <= prev_inflation:
+        database.log_event(
+            game_id, next_year, 'ECONOMIC', "Deflasi",
+            "Harga barang dan jasa mulai menurun kuartal ini, dapat menandakan pelemahan permintaan domestik."
+        )
+
     # 5b. Corruption Dynamics
     # Corruption only grows through corrupt actions (e.g. bribing the opposition)
     # applied directly to the DB by apply_bribe(); here it just decays slowly
@@ -367,6 +434,18 @@ def simulate_turn(game_id, inputs):
     # plus a specialization bonus for countries whose dominant trade lever is imports.
     import_tariff_revenue = new_gdp * import_dependency * (import_tariff / 100.0) * 0.125 * import_tariff_bonus
     revenue += import_tariff_revenue
+
+    # Trade Balance / Current Account - a separate macro gauge of total export
+    # vs. import VALUE flowing through the economy (distinct from the tariff
+    # REVENUE collected above, which is government income, not trade volume).
+    # Raising either tariff dampens that side's own volume (protectionism).
+    # Not fed back into treasury - it would double-count the tariff revenue
+    # already added above.
+    export_volume_factor = 1.0 - (export_tariff / 100.0) * 0.3
+    import_volume_factor = 1.0 - (import_tariff / 100.0) * 0.3
+    trade_balance = new_gdp * 0.15 * (
+        export_dependency * export_volume_factor - import_dependency * import_volume_factor
+    )
 
     # Debt Interest - rate depends on difficulty and the Sovereign Credit
     # Rating (derived from last quarter's Debt/GDP ratio and Corruption),
@@ -448,9 +527,24 @@ def simulate_turn(game_id, inputs):
 
     new_happiness -= corruption_index * 0.05  # public distrust from corruption, up to -5 at 100%
     new_happiness -= import_dependency * (import_tariff / 100.0) * 15.0  # cost-of-living hit from pricier imported goods
+    new_happiness -= max(0.0, new_inflation - 0.0075) * 300.0  # cost-of-living squeeze above baseline inflation
     new_happiness += cabinet_bonus.get("Menteri Sosial", 0.0)
 
     new_happiness = max(0.0, min(100.0, new_happiness))
+
+    # 8a. Inequality Index (Gini-like, 0-100, higher = more unequal) - a
+    # structural gap from the population's income-class mix (see
+    # INCOME_WEIGHTS above), narrowed by a progressive tax spread
+    # (tax_high - tax_low) and by welfare spending as a share of GDP.
+    w_low = r_low * INCOME_WEIGHTS['low']
+    w_mid = r_mid * INCOME_WEIGHTS['mid']
+    w_high = r_high * INCOME_WEIGHTS['high']
+    w_elder = r_elder * INCOME_WEIGHTS['elder']
+    total_w = w_low + w_mid + w_high + w_elder
+    pre_tax_gap = (w_high / total_w - w_low / total_w) * 100.0
+    tax_progressivity = tax_high - tax_low
+    inequality_index = pre_tax_gap - tax_progressivity * 40.0 - (b_welf / gdp) * 300.0
+    inequality_index = max(0.0, min(100.0, inequality_index))
 
     # 8b. Political Opposition Dynamics
     # Every policy lever pulls you closer to your own party's ideology or the
@@ -480,6 +574,7 @@ def simulate_turn(game_id, inputs):
     prev_opposition = prev_state['opposition_strength']
     opp_growth_mult = diff_settings["opposition_growth_mult"]
     opposition_strength = prev_opposition * 0.9601 + (divergence * 5.0 + max(0.0, (40.0 - new_happiness)) * 0.125) * opp_growth_mult
+    opposition_strength += max(0.0, inequality_index - 65.0) * 0.05  # severe inequality fuels unrest independent of party loyalty
     opposition_strength = max(0.0, min(100.0, opposition_strength))
 
     if opposition_strength >= 50.0 and prev_opposition < 50.0:
@@ -518,6 +613,23 @@ def simulate_turn(game_id, inputs):
                 game_id, next_year, 'SOCIAL', "Pemilu: Kalah",
                 f"Approval Rating anjlok ke {approval_rating:.1f}%. Rakyat memilih {opposition_party} untuk memimpin pemerintahan baru."
             )
+
+    # 8d. Investor Confidence Index (0-100, fast-reacting) - a pure read gauge
+    # blending Credit Rating (40%), Foreign Relations (25%), the inverse of
+    # Corruption (20%), political stability i.e. inverse of Opposition (10%),
+    # and Trade Balance (5%). Unlike the other new metrics it doesn't feed
+    # back into any other formula - it's a snapshot for the player to watch.
+    conf_debt_to_gdp_pct = (new_treasury / new_gdp) * 100.0
+    conf_rating = database.get_credit_rating(conf_debt_to_gdp_pct, corruption_index)
+    trade_component = min(100.0, max(0.0, 50.0 + trade_balance / max(1.0, new_gdp) * 500.0))
+    investor_confidence = (
+        RATING_SCORES.get(conf_rating['letter'], 10) * 0.40 +
+        foreign_relations * 0.25 +
+        (100.0 - corruption_index) * 0.20 +
+        (100.0 - opposition_strength) * 0.10 +
+        trade_component * 0.05
+    )
+    investor_confidence = max(0.0, min(100.0, investor_confidence))
 
     # 9. Demographic Shifts & Mobility (all annual rates quartered)
     # Birth rate scales with happiness and healthcare index
@@ -742,10 +854,16 @@ def simulate_turn(game_id, inputs):
         'education_index': round(education_index, 1),
         'health_index': round(health_index, 1),
         'infrastructure': round(infrastructure, 1),
+        'welfare_index': round(welfare_index, 1),
+        'public_safety_index': round(public_safety_index, 1),
         'opposition_strength': round(opposition_strength, 1),
         'corruption_index': round(corruption_index, 1),
         'foreign_relations': round(foreign_relations, 1),
         'coalition_support': round(coalition_support, 1),
+        'inflation_rate': round(new_inflation, 4),
+        'trade_balance': round(trade_balance, 2),
+        'inequality_index': round(inequality_index, 1),
+        'investor_confidence': round(investor_confidence, 1),
         'tax_low': tax_low,
         'tax_mid': tax_mid,
         'tax_high': tax_high,

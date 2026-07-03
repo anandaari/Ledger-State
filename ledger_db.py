@@ -152,7 +152,7 @@ def get_opposition_party(party_name):
 # Cabinet: one advisor can be hired per position. Higher tiers cost more to
 # hire and to keep on payroll (salary is deducted from treasury every turn)
 # but give a bigger bonus to the position's linked stat in engine.py.
-CABINET_POSITIONS = ["Menteri Pendidikan", "Menteri Kesehatan", "Menteri Infrastruktur", "Menteri Sosial", "Menteri Keamanan"]
+CABINET_POSITIONS = ["Menteri Pendidikan", "Menteri Kesehatan", "Menteri Infrastruktur", "Menteri Sosial", "Menteri Keamanan", "Gubernur Bank Sentral"]
 
 # bonus and salary are applied every turn, so both are quartered from their
 # original per-year magnitude now that a turn is a quarter, not a year;
@@ -199,6 +199,11 @@ MINISTER_ADVICE_MAP = {
         "target_field": "crime_rate",
         "effect_magnitude": -0.08,
         "advice_text": "Naikkan anggaran Keamanan untuk menekan tingkat kriminalitas.",
+    },
+    "Gubernur Bank Sentral": {
+        "target_field": "inflation_rate",
+        "effect_magnitude": -0.005,
+        "advice_text": "Kendalikan laju kenaikan Upah Minimum dan Tarif Impor untuk meredam tekanan inflasi.",
     },
 }
 MINISTER_ADVICE_COST = 20.0
@@ -291,11 +296,77 @@ def get_difficulty(game_id, db_path=DB_PATH):
 def get_difficulty_settings(game_id, db_path=DB_PATH):
     return DIFFICULTY_SETTINGS[get_difficulty(game_id, db_path)]
 
-ADVISOR_NAME_POOL = [
-    "Dr. Siti Amelia", "Prof. Bambang Wirawan", "Dr. Kevin Halim", "Ratna Sari Dewi",
-    "Prof. Agus Santoso", "Dr. Michelle Tanoto", "Hendra Wijaya", "Dr. Farah Nabila",
-    "Prof. Yusuf Kartawijaya", "Dr. Grace Lim",
-]
+# Fictional (not real-world) advisor names, curated per country and per tier
+# so the player picks a specific name when hiring instead of getting a random
+# one - names lean on each country's naming conventions for flavor, and get
+# more formal/academic titles at higher tiers (Muda = fresh graduate, Pakar =
+# decorated expert). Deliberately avoids reusing any actual real politician's
+# full name. Each tier pool holds 9 names (not just 3) so that
+# get_advisor_name_choices can exclude whoever is already serving in another
+# cabinet position - with 6 cabinet positions, worst case 5 are already
+# filled at the same tier, still leaving >=3 free names to offer for the 6th.
+ADVISOR_NAME_POOLS = {
+    "Indonesia": {
+        "Muda": ["Fajar Nugroho", "Dewi Anggraini", "Rizky Ramadhan", "Anisa Rahmawati", "Doni Kurniawan",
+                 "Putri Wulandari", "Dimas Prakoso", "Intan Permata", "Reza Firmansyah"],
+        "Berpengalaman": ["Ir. Bambang Wirawan", "Siti Amelia Putri, M.M.", "Hendra Wijaya", "Drs. Slamet Riyadi",
+                          "Dra. Endang Suryani", "Dr. Kevin Halim", "Dr. Farah Nabila", "Ir. Kartika Sari, M.T.",
+                          "Komisaris Besar Arman Hidayat"],
+        "Pakar": ["Prof. Dr. Yusuf Kartawijaya", "Dr. Ratna Sari Dewi", "Prof. Dr. Agus Santoso", "Prof. Dr. Grace Lim",
+                  "Prof. Ir. Dr. Wibisono Aditya", "Prof. Dr. Herman Susilo", "Jenderal (Purn.) Suryo Wibowo",
+                  "Prof. Dr. dr. Bagus Kurniawan", "Prof. Dr. Anggraeni Puspitasari"],
+    },
+    "Singapore": {
+        "Muda": ["Tan Wei Jie", "Nur Aisyah Binte Ismail", "Kevin Goh Junwei", "Jasmine Lee Hui Xin", "Amirul bin Rashid",
+                 "Deepa Ramesh", "Marcus Chua Jun Hao", "Nurul Huda binte Zainal", "Karthik Subramaniam"],
+        "Berpengalaman": ["Rajesh Kumar Pillai", "Michelle Tanoto", "Lim Kok Wei", "Serene Goh Li Ling",
+                          "Zulkifli bin Ahmad", "Kavitha Raman", "Daniel Ong Wei Liang", "Fatimah binte Yusof",
+                          "Major Kelvin Yeo Chin Hock"],
+        "Pakar": ["Prof. Grace Lim Hui Min", "Dr. Ahmad Faizal bin Hassan", "Prof. Wong Kai Ming", "Prof. Dr. Chan Poh Lin",
+                  "Prof. Dr. Ganesh Iyer", "Prof. Eng. Ho Cheng Huat", "Brigadier-General (Ret.) Ng Boon Huat",
+                  "Prof. Dr. Koh Bee Choo", "Prof. Dr. Foo Kok Seng"],
+    },
+    "United States": {
+        "Muda": ["Jake Thompson", "Emily Carter", "Marcus Reed", "Olivia Bennett", "Tyler Brooks", "Hannah Wallace",
+                 "Nathan Price", "Grace Coleman", "Ethan Sanders"],
+        "Berpengalaman": ["Sarah Mitchell", "Robert Jennings", "Angela Foster", "Dr. Karen Lewis", "Major Brian Coleman",
+                          "Patricia Nguyen", "Dr. Steven Park", "Rachel Adams", "Colonel Frank Delgado"],
+        "Pakar": ["Prof. Dr. David Whitman", "Dr. Linda Harrington", "Prof. Dr. Michael Chen", "Prof. Dr. Susan Blackwell",
+                  "General (Ret.) James Calloway", "Prof. Dr. Rebecca Stone", "Prof. Dr. Thomas Reilly",
+                  "Dr. Monica Alvarez", "Prof. Dr. William Ashford"],
+    },
+    "Japan": {
+        "Muda": ["Yuki Sato", "Kenji Watanabe", "Aiko Kobayashi", "Sora Matsumoto", "Rina Endo", "Daiki Inoue",
+                 "Hana Kimura", "Ren Saito", "Mio Shimizu"],
+        "Berpengalaman": ["Hiroshi Tanaka", "Naoko Yamada", "Takeshi Nakamura", "Dr. Emiko Suzuki", "Yumiko Hayashi",
+                          "Major Ichiro Mori", "Kazuki Ono", "Sachiko Fujita", "Colonel Takumi Abe"],
+        "Pakar": ["Prof. Dr. Akira Fujimoto", "Prof. Dr. Nozomi Kato", "Prof. Dr. Ryota Ishikawa", "Prof. Dr. Michiko Kondo",
+                  "General (Ret.) Kenta Yoshida", "Prof. Dr. Satoshi Aoki", "Prof. Dr. Yoko Nishimura",
+                  "Dr. Haruto Kaneko", "Prof. Dr. Miyuki Ogawa"],
+    },
+    "Germany": {
+        "Muda": ["Lukas Hoffmann", "Anna Fischer", "Jonas Weber", "Lena Schulz", "Felix Wagner", "Marie Becker",
+                 "Paul Hartmann", "Laura Schuster", "Tim Neumann"],
+        "Berpengalaman": ["Klaus Müller", "Helga Richter", "Stefan Braun", "Dr. Sabine Krüger", "Major Dieter Lange",
+                          "Petra Vogel", "Dr. Matthias Keller", "Birgit Wolf", "Colonel Rainer Schmid"],
+        "Pakar": ["Prof. Dr. Heinrich Bauer", "Dr. Ingrid Schneider", "Prof. Dr. Wolfgang Zimmermann",
+                  "Prof. Dr. Gisela Hoffstetter", "General (Ret.) Manfred Kessler", "Prof. Dr. Renate Albrecht",
+                  "Prof. Dr. Dieter Straub", "Dr. Christine Berger", "Prof. Dr. Werner Lindemann"],
+    },
+}
+
+def get_advisor_name_choices(game_id, country_name, tier, db_path=DB_PATH):
+    """
+    Candidate advisor names the hiring UI should offer for this country/tier
+    combo, excluding anyone already serving in ANOTHER cabinet position in
+    this game - a named advisor can't simultaneously hold two ministries.
+    Falls back to the full pool only in the unlikely case exclusion would
+    leave zero choices (pool sizes are kept large enough to avoid this).
+    """
+    pool = ADVISOR_NAME_POOLS.get(country_name, ADVISOR_NAME_POOLS["Indonesia"])[tier]
+    already_serving = {c['advisor_name'] for c in get_cabinet(game_id, db_path)}
+    available = [name for name in pool if name not in already_serving]
+    return available if available else pool
 
 # Random Narrative Events: occasional turns present the player with a discrete
 # choice (not a slider) that has immediate stat consequences, applied in-place
@@ -411,6 +482,7 @@ EVENT_ADVICE_MAP = {
     "EVENT: Global Recession": "Pertimbangkan menahan belanja diskresi atau perkuat Perjanjian Dagang untuk meredam dampak resesi global.",
     "EVENT: Cyber Ransom Attack": "Naikkan Anggaran Keamanan atau Infrastruktur untuk memperkuat pertahanan digital negara.",
     "EVENT: Bencana Alam": "Naikkan Anggaran Infrastruktur untuk mempercepat pemulihan pasca-bencana.",
+    "Inflasi Tinggi": "Turunkan Pajak Impor atau kendalikan kenaikan Upah Minimum untuk meredam inflasi; hindari menumpuk utang berlebihan.",
 }
 
 def get_event_advice(ev, crisis_requirements=None):
@@ -503,7 +575,7 @@ def _schema_is_stale(cursor):
     if 'nation_history' in existing_tables:
         cursor.execute("PRAGMA table_info(nation_history)")
         cols = {row[1] for row in cursor.fetchall()}
-        if not {'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'tax_low', 'tax_mid', 'tax_high', 'opposition_strength', 'corruption_index', 'crime_rate', 'min_wage', 'export_tariff', 'import_tariff', 'foreign_relations', 'coalition_support', 'happiness_low', 'happiness_mid', 'happiness_high', 'happiness_elder'}.issubset(cols):
+        if not {'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'tax_low', 'tax_mid', 'tax_high', 'opposition_strength', 'corruption_index', 'crime_rate', 'min_wage', 'export_tariff', 'import_tariff', 'foreign_relations', 'coalition_support', 'happiness_low', 'happiness_mid', 'happiness_high', 'happiness_elder', 'inflation_rate', 'trade_balance', 'inequality_index', 'investor_confidence', 'welfare_index', 'public_safety_index'}.issubset(cols):
             return True
 
     if 'pending_events' in existing_tables:
@@ -568,6 +640,12 @@ def init_db(db_path=DB_PATH):
         corruption_index REAL NOT NULL,
         foreign_relations REAL NOT NULL,
         coalition_support REAL NOT NULL,
+        inflation_rate REAL NOT NULL,
+        trade_balance REAL NOT NULL,
+        inequality_index REAL NOT NULL,
+        investor_confidence REAL NOT NULL,
+        welfare_index REAL NOT NULL,
+        public_safety_index REAL NOT NULL,
 
         -- Inputs
         tax_low REAL NOT NULL,
@@ -682,12 +760,14 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
     INSERT INTO nation_history (
         game_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
         employment_rate, crime_rate, happiness, happiness_low, happiness_mid, happiness_high, happiness_elder,
-        education_index, health_index, infrastructure, opposition_strength, corruption_index,
+        education_index, health_index, infrastructure, welfare_index, public_safety_index,
+        opposition_strength, corruption_index,
         foreign_relations, coalition_support,
+        inflation_rate, trade_balance, inequality_index, investor_confidence,
         tax_low, tax_mid, tax_high,
         budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security,
         min_wage, export_tariff, import_tariff
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         game_id, initial_year,
         treasury,
@@ -706,10 +786,12 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
         50.0,
         50.0,
         50.0,
+        50.0, 50.0,
         15.0,
         0.0,
         50.0,
         0.0,
+        0.005, 0.0, 40.0, 60.0,
         preset["tax_low"],
         preset["tax_mid"],
         preset["tax_high"],
@@ -798,8 +880,10 @@ def get_latest_turn(game_id, db_path=DB_PATH):
     cursor.execute("""
         SELECT history_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
                employment_rate, crime_rate, happiness, happiness_low, happiness_mid, happiness_high, happiness_elder,
-               education_index, health_index, infrastructure, opposition_strength, corruption_index,
+               education_index, health_index, infrastructure, welfare_index, public_safety_index,
+               opposition_strength, corruption_index,
                foreign_relations, coalition_support,
+               inflation_rate, trade_balance, inequality_index, investor_confidence,
                tax_low, tax_mid, tax_high,
                budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security,
                min_wage, export_tariff, import_tariff
@@ -813,8 +897,10 @@ def get_latest_turn(game_id, db_path=DB_PATH):
         columns = [
             'history_id', 'turn_year', 'treasury', 'gdp', 'pop_low', 'pop_mid', 'pop_high', 'pop_elder',
             'employment_rate', 'crime_rate', 'happiness', 'happiness_low', 'happiness_mid', 'happiness_high', 'happiness_elder',
-            'education_index', 'health_index', 'infrastructure', 'opposition_strength', 'corruption_index',
+            'education_index', 'health_index', 'infrastructure', 'welfare_index', 'public_safety_index',
+            'opposition_strength', 'corruption_index',
             'foreign_relations', 'coalition_support',
+            'inflation_rate', 'trade_balance', 'inequality_index', 'investor_confidence',
             'tax_low', 'tax_mid', 'tax_high',
             'budget_education', 'budget_health', 'budget_infrastructure', 'budget_welfare', 'budget_security',
             'min_wage', 'export_tariff', 'import_tariff'
@@ -829,7 +915,9 @@ def get_history(game_id, db_path=DB_PATH):
         SELECT turn_year, treasury, gdp, (pop_low + pop_mid + pop_high + pop_elder) as population,
                employment_rate, happiness, education_index, health_index, infrastructure,
                tax_low, tax_mid, tax_high, pop_low, pop_mid, pop_high, pop_elder, opposition_strength, corruption_index, crime_rate,
-               happiness_low, happiness_mid, happiness_high, happiness_elder
+               happiness_low, happiness_mid, happiness_high, happiness_elder,
+               inflation_rate, trade_balance, inequality_index, investor_confidence,
+               welfare_index, public_safety_index
         FROM nation_history
         WHERE game_id = ?
         ORDER BY turn_year ASC
@@ -845,20 +933,24 @@ def save_turn_state(game_id, data, db_path=DB_PATH):
     INSERT INTO nation_history (
         game_id, turn_year, treasury, gdp, pop_low, pop_mid, pop_high, pop_elder,
         employment_rate, crime_rate, happiness, happiness_low, happiness_mid, happiness_high, happiness_elder,
-        education_index, health_index, infrastructure, opposition_strength, corruption_index,
+        education_index, health_index, infrastructure, welfare_index, public_safety_index,
+        opposition_strength, corruption_index,
         foreign_relations, coalition_support,
+        inflation_rate, trade_balance, inequality_index, investor_confidence,
         tax_low, tax_mid, tax_high,
         budget_education, budget_health, budget_infrastructure, budget_welfare, budget_security,
         min_wage, export_tariff, import_tariff
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         game_id, data['turn_year'], data['treasury'], data['gdp'],
         data['pop_low'], data['pop_mid'], data['pop_high'], data['pop_elder'],
         data['employment_rate'], data['crime_rate'], data['happiness'],
         data['happiness_low'], data['happiness_mid'], data['happiness_high'], data['happiness_elder'],
         data['education_index'],
-        data['health_index'], data['infrastructure'], data['opposition_strength'], data['corruption_index'],
+        data['health_index'], data['infrastructure'], data['welfare_index'], data['public_safety_index'],
+        data['opposition_strength'], data['corruption_index'],
         data['foreign_relations'], data['coalition_support'],
+        data['inflation_rate'], data['trade_balance'], data['inequality_index'], data['investor_confidence'],
         data['tax_low'], data['tax_mid'], data['tax_high'],
         data['budget_education'], data['budget_health'], data['budget_infrastructure'],
         data['budget_welfare'], data['budget_security'],
@@ -1204,14 +1296,14 @@ def get_adjusted_tier_info(game_id, tier, db_path=DB_PATH):
         'salary': round(base['salary'] * cost_mult, 2),
     }
 
-def hire_advisor(game_id, position, tier, db_path=DB_PATH):
+def hire_advisor(game_id, position, tier, advisor_name, db_path=DB_PATH):
     """
     Hires (or replaces) the advisor in the given cabinet position, paying the
     tier's hire_cost immediately from the current turn's treasury. The
-    ongoing salary is deducted every subsequent turn by engine.py.
+    ongoing salary is deducted every subsequent turn by engine.py. advisor_name
+    is picked by the player from get_advisor_name_choices(), not randomized.
     """
     tier_info = ADVISOR_TIERS[tier]
-    advisor_name = random.choice(ADVISOR_NAME_POOL)
     cost_mult = get_difficulty_settings(game_id, db_path)["minister_cost_mult"]
     hire_cost = round(tier_info['hire_cost'] * cost_mult, 2)
     salary = round(tier_info['salary'] * cost_mult, 2)
@@ -1340,7 +1432,8 @@ def resolve_pending_event(game_id, event_key, choice_label, db_path=DB_PATH):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT history_id, turn_year, treasury, gdp, happiness, opposition_strength,
-               corruption_index, infrastructure, health_index, education_index, crime_rate, foreign_relations
+               corruption_index, infrastructure, health_index, education_index, crime_rate, foreign_relations,
+               inflation_rate
         FROM nation_history WHERE game_id = ? ORDER BY turn_year DESC LIMIT 1
     """, (game_id,))
     row = cursor.fetchone()
@@ -1349,7 +1442,8 @@ def resolve_pending_event(game_id, event_key, choice_label, db_path=DB_PATH):
         return None
 
     (history_id, turn_year, treasury, gdp, happiness, opposition_strength,
-     corruption_index, infrastructure, health_index, education_index, crime_rate, foreign_relations) = row
+     corruption_index, infrastructure, health_index, education_index, crime_rate, foreign_relations,
+     inflation_rate) = row
 
     new_treasury = treasury + effects.get('treasury', 0.0)
     new_gdp = max(10.0, gdp + effects.get('gdp', 0.0))
@@ -1361,15 +1455,16 @@ def resolve_pending_event(game_id, event_key, choice_label, db_path=DB_PATH):
     new_education = max(0.0, min(100.0, education_index + effects.get('education_index', 0.0)))
     new_crime = max(0.0, min(1.0, crime_rate + effects.get('crime_rate', 0.0)))
     new_relations = max(0.0, min(100.0, foreign_relations + effects.get('foreign_relations', 0.0)))
+    new_inflation = max(-0.01, min(0.06, inflation_rate + effects.get('inflation_rate', 0.0)))
 
     cursor.execute("""
         UPDATE nation_history
         SET treasury = ?, gdp = ?, happiness = ?, opposition_strength = ?,
             corruption_index = ?, infrastructure = ?, health_index = ?, education_index = ?, crime_rate = ?,
-            foreign_relations = ?
+            foreign_relations = ?, inflation_rate = ?
         WHERE history_id = ?
     """, (new_treasury, new_gdp, new_happiness, new_opposition, new_corruption,
-          new_infrastructure, new_health, new_education, new_crime, new_relations, history_id))
+          new_infrastructure, new_health, new_education, new_crime, new_relations, new_inflation, history_id))
 
     cursor.execute("DELETE FROM pending_events WHERE game_id = ?", (game_id,))
     conn.commit()

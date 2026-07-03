@@ -330,7 +330,9 @@ def show_dashboard(game_id, lang):
         'turn_year', 'treasury', 'gdp', 'population', 'employment_rate', 'happiness',
         'education_index', 'health_index', 'infrastructure', 'tax_low', 'tax_mid', 'tax_high',
         'pop_low', 'pop_mid', 'pop_high', 'pop_elder', 'opposition_strength', 'corruption_index', 'crime_rate',
-        'happiness_low', 'happiness_mid', 'happiness_high', 'happiness_elder'
+        'happiness_low', 'happiness_mid', 'happiness_high', 'happiness_elder',
+        'inflation_rate', 'trade_balance', 'inequality_index', 'investor_confidence',
+        'welfare_index', 'public_safety_index'
     ])
     # Each row is now a quarter, not a year - charts use this readable
     # "2026 Q1" label as the x-axis instead of the raw turn index.
@@ -395,6 +397,19 @@ def show_dashboard(game_id, lang):
         attention_items.append(t(lang, "attention_active_crisis", name=active_crisis['name']))
     if attention_items:
         st.sidebar.warning(t(lang, "attention_banner_header") + "\n" + "\n".join(f"- {item}" for item in attention_items))
+
+    # Formula & Parameter Guide - collapsed by default like Political Actions;
+    # explains cross-cutting causal links (e.g. inflation -> stagflation) that
+    # a single st.metric help= tooltip can't hold, so a slider-curious player
+    # can check it before touching the budget form below.
+    with st.sidebar.expander(t(lang, "help_expander_label"), expanded=False):
+        st.caption(t(lang, "help_intro"))
+        st.markdown(t(lang, "help_section_growth"))
+        st.markdown(t(lang, "help_section_inflation"))
+        st.markdown(t(lang, "help_section_trade"))
+        st.markdown(t(lang, "help_section_inequality"))
+        st.markdown(t(lang, "help_section_confidence"))
+        st.markdown(t(lang, "help_section_welfare_safety"))
 
     # Football-Manager-style flow: ending a fiscal year doesn't just silently
     # jump to the next dashboard - a "Year in Review" popup summarizes what
@@ -815,6 +830,37 @@ def show_dashboard(game_id, lang):
             st.metric(t(lang, "monitor_credit_rating_label"), rating_info['letter'],
                        help=t(lang, "monitor_credit_rating_help"))
 
+    # Economic Indicators row - Inflation/Trade Balance/Inequality/Investor
+    # Confidence, the 4 metrics newly added alongside the Formula Guide above.
+    inflation_delta = 0.0
+    trade_balance_delta = 0.0
+    inequality_delta = 0.0
+    confidence_delta = 0.0
+    if len(df_history) >= 2:
+        inflation_delta = float((df_history['inflation_rate'].iloc[-1] - df_history['inflation_rate'].iloc[-2]) * 100.0)
+        trade_balance_delta = float(df_history['trade_balance'].iloc[-1] - df_history['trade_balance'].iloc[-2])
+        inequality_delta = float(df_history['inequality_index'].iloc[-1] - df_history['inequality_index'].iloc[-2])
+        confidence_delta = float(df_history['investor_confidence'].iloc[-1] - df_history['investor_confidence'].iloc[-2])
+
+    with st.container(border=True):
+        col_e1, col_e2, col_e3, col_e4 = st.columns(4)
+        with col_e1:
+            st.metric(t(lang, "kpi_inflation_label"), f"{latest_state['inflation_rate'] * 100:.2f}%",
+                       delta=f"{inflation_delta:+.2f}%", delta_color="inverse",
+                       help=t(lang, "kpi_inflation_help"))
+        with col_e2:
+            st.metric(t(lang, "kpi_trade_balance_label"), fmt_money(latest_state['trade_balance']),
+                       delta=fmt_money(trade_balance_delta, signed=True),
+                       help=t(lang, "kpi_trade_balance_help"))
+        with col_e3:
+            st.metric(t(lang, "kpi_inequality_label"), f"{latest_state['inequality_index']:.1f}",
+                       delta=f"{inequality_delta:+.1f}", delta_color="inverse",
+                       help=t(lang, "kpi_inequality_help"))
+        with col_e4:
+            st.metric(t(lang, "kpi_investor_confidence_label"), f"{latest_state['investor_confidence']:.1f}",
+                       delta=f"{confidence_delta:+.1f}",
+                       help=t(lang, "kpi_investor_confidence_help"))
+
         foreign_relations = latest_state['foreign_relations']
         coalition_support = latest_state['coalition_support']
         opp_tier = "danger" if opp_strength >= 80 else ("caution" if opp_strength >= 50 else "good")
@@ -870,10 +916,34 @@ def show_dashboard(game_id, lang):
         fig_econ.update_layout(title=t(lang, "tab1_chart_title"), template="plotly_dark", hovermode="x unified")
         st.plotly_chart(fig_econ, width='stretch')
 
+        # Inflation trend
+        fig_inflation = go.Figure()
+        fig_inflation.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['inflation_rate'] * 100.0,
+                                            mode='lines+markers', name="Inflasi (%)", line=dict(color='#FFD166')))
+        fig_inflation.update_layout(title=t(lang, "tab1_chart_inflation_title"), template="plotly_dark", hovermode="x unified")
+        st.plotly_chart(fig_inflation, width='stretch')
+
+        # Trade Balance trend - local currency, like the GDP/Treasury chart
+        trade_balance_local_series = database.to_local(df_history['trade_balance'], country_name)
+        fig_trade = go.Figure()
+        fig_trade.add_trace(go.Scatter(x=df_history['period_label'], y=trade_balance_local_series,
+                                        mode='lines+markers', name=f"Neraca Dagang ({currency_unit})", line=dict(color='#06D6A0')))
+        fig_trade.update_layout(title=t(lang, "tab1_chart_trade_title"), template="plotly_dark", hovermode="x unified")
+        st.plotly_chart(fig_trade, width='stretch')
+
+        # Inequality Index & Investor Confidence trend - both already 0-100 scale
+        fig_stability = go.Figure()
+        fig_stability.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['inequality_index'],
+                                            mode='lines+markers', name="Indeks Ketimpangan", line=dict(color='#EF476F')))
+        fig_stability.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['investor_confidence'],
+                                            mode='lines+markers', name="Kepercayaan Investor", line=dict(color='#118AB2')))
+        fig_stability.update_layout(title=t(lang, "tab1_chart_stability_title"), template="plotly_dark", hovermode="x unified")
+        st.plotly_chart(fig_stability, width='stretch')
+
     with tab2:
         st.subheader(t(lang, "tab2_subheader"))
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
             st.metric(t(lang, "edu_index_label"), f"{latest_state['education_index']:.1f}%",
                       help=t(lang, "edu_index_help"))
@@ -883,6 +953,12 @@ def show_dashboard(game_id, lang):
         with c3:
             st.metric(t(lang, "infra_index_label"), f"{latest_state['infrastructure']:.1f}%",
                       help=t(lang, "infra_index_help"))
+        with c4:
+            st.metric(t(lang, "welfare_index_label"), f"{latest_state['welfare_index']:.1f}%",
+                      help=t(lang, "welfare_index_help"))
+        with c5:
+            st.metric(t(lang, "public_safety_index_label"), f"{latest_state['public_safety_index']:.1f}%",
+                      help=t(lang, "public_safety_index_help"))
 
         fig_indices = go.Figure()
         fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['education_index'], mode='lines+markers', name='Education', line=dict(dash='dash', color='#FFD166')))
@@ -891,6 +967,14 @@ def show_dashboard(game_id, lang):
         fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness'], mode='lines+markers', name='Happiness (%)', line=dict(width=3, color='#EF476F')))
         fig_indices.update_layout(title=t(lang, "tab2_chart_title"), template="plotly_dark")
         st.plotly_chart(fig_indices, width='stretch')
+
+        fig_welfare_safety = go.Figure()
+        fig_welfare_safety.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['welfare_index'],
+                                                  mode='lines+markers', name='Welfare Index', line=dict(color='#FF9F1C')))
+        fig_welfare_safety.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['public_safety_index'],
+                                                  mode='lines+markers', name='Public Safety Index', line=dict(color='#8338EC')))
+        fig_welfare_safety.update_layout(title=t(lang, "tab2_chart2_title"), template="plotly_dark")
+        st.plotly_chart(fig_welfare_safety, width='stretch')
 
     with tab3:
         st.subheader(t(lang, "tab3_subheader"))
@@ -988,7 +1072,7 @@ def show_dashboard(game_id, lang):
                         database.fire_advisor(game_id, position)
                         st.rerun()
             else:
-                col_a, col_b, col_c = st.columns([2, 1, 1])
+                col_a, col_b, col_c, col_d = st.columns([2, 1, 2, 1])
                 with col_a:
                     st.write(t(lang, "vacant_label"))
                 with col_b:
@@ -997,9 +1081,15 @@ def show_dashboard(game_id, lang):
                         key=f"tier_{position}", label_visibility="collapsed"
                     )
                 with col_c:
+                    name_choices = database.get_advisor_name_choices(game_id, country_name, tier_choice)
+                    name_choice = st.selectbox(
+                        t(lang, "advisor_name_label"), name_choices,
+                        key=f"name_{position}_{tier_choice}", label_visibility="collapsed"
+                    )
+                with col_d:
                     tier_info = database.get_adjusted_tier_info(game_id, tier_choice)
                     if st.button(t(lang, "recruit_button", cost=fmt_money(tier_info['hire_cost'])), key=f"hire_{position}"):
-                        database.hire_advisor(game_id, position, tier_choice)
+                        database.hire_advisor(game_id, position, tier_choice, name_choice)
                         st.rerun()
             st.divider()
 
