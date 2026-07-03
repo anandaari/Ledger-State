@@ -763,7 +763,7 @@ def create_new_game(nation_name, country_name, difficulty, party_name, db_path=D
          "Keep Welfare budget above 0.75% of your quarterly GDP (family subsidies) OR keep combined Security & Infrastructure spending at 15% of total budget (to support high-skill immigration) for 12 quarters."),
 
         (game_id, "The Carbon Transition Tariff", 0, 16, 0, 12, 'INACTIVE',
-         "Global partners threat trade sanctions on the country's carbon emissions unless clean production targets are met.",
+         "Global partners threaten trade sanctions on the country's carbon emissions unless clean production targets are met.",
          "Keep Infrastructure budget above 0.5% of your quarterly GDP (green grid) AND Security budget above 0.125% of your quarterly GDP (emissions enforcement) for 12 quarters."),
 
         (game_id, "Krisis Utang Nasional", 0, 16, 0, 12, 'INACTIVE',
@@ -951,6 +951,28 @@ def update_crisis_state(crisis_id, current_progress, status, start_year=None, db
         """, (current_progress, status, crisis_id))
     conn.commit()
     conn.close()
+
+def list_games(limit=10, db_path=DB_PATH):
+    """
+    Most recently created games, for the "Continue Administration" picker on
+    the start screen - lets a player resume after their browser session gets
+    dropped (e.g. the computer sleeps and the WebSocket connection resets,
+    which loses st.session_state.game_id even though the game's data was
+    never actually lost from this SQLite file).
+    """
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT g.game_id, g.nation_name, g.country_name, g.party_name, g.difficulty,
+               (SELECT MAX(turn_year) FROM nation_history WHERE game_id = g.game_id) as latest_turn
+        FROM games g
+        ORDER BY g.game_id DESC
+        LIMIT ?
+    """, (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+    columns = ['game_id', 'nation_name', 'country_name', 'party_name', 'difficulty', 'latest_turn']
+    return [dict(zip(columns, r)) for r in rows if r[5] is not None]
 
 def get_nation_name(game_id, db_path=DB_PATH):
     conn = get_connection(db_path)

@@ -60,12 +60,52 @@ def main():
     if 'game_id' not in st.session_state:
         st.session_state.game_id = None
 
+    # Auto-resume: st.session_state is in-memory and tied to the browser's
+    # WebSocket connection - if that drops (e.g. the computer sleeps), a
+    # reconnect looks like a brand new session and game_id would otherwise
+    # reset to None even though the game's data was never actually lost from
+    # ledger.db. Stashing game_id in the URL survives that reconnect.
     if st.session_state.game_id is None:
+        url_game_id = st.query_params.get("game_id")
+        if url_game_id:
+            try:
+                candidate_id = int(url_game_id)
+                if database.get_latest_turn(candidate_id):
+                    st.session_state.game_id = candidate_id
+            except (ValueError, TypeError):
+                pass
+
+    if st.session_state.game_id is None:
+        st.query_params.pop("game_id", None)
         show_start_screen(lang)
     else:
         show_dashboard(st.session_state.game_id, lang)
 
 def show_start_screen(lang):
+    # Continue Administration - the game's actual data lives in ledger.db and
+    # is never lost, but st.session_state.game_id (which game THIS browser
+    # tab is looking at) resets if the connection drops - e.g. the computer
+    # sleeps. This is the manual way back in when the URL auto-resume (see
+    # main()) doesn't apply, or when picking among several ongoing games.
+    existing_games = database.list_games()
+    if existing_games:
+        st.subheader(t(lang, "continue_header"))
+        for g in existing_games:
+            cal_year, cal_quarter = database.get_calendar_label(g['latest_turn'])
+            col_info, col_btn = st.columns([4, 1])
+            with col_info:
+                st.write(t(
+                    lang, "continue_row",
+                    nation=g['nation_name'], country=g['country_name'], party=g['party_name'],
+                    difficulty=g['difficulty'], year=cal_year, quarter=cal_quarter
+                ))
+            with col_btn:
+                if st.button(t(lang, "continue_button_label"), key=f"continue_{g['game_id']}", width="stretch"):
+                    st.session_state.game_id = g['game_id']
+                    st.query_params["game_id"] = str(g['game_id'])
+                    st.rerun()
+        st.divider()
+
     st.subheader(t(lang, "start_subheader"))
     st.write(t(lang, "start_description"))
 
@@ -118,6 +158,7 @@ def show_start_screen(lang):
         st.session_state.username = username
         game_id = database.create_new_game(nation_name, country_name, difficulty, party_name)
         st.session_state.game_id = game_id
+        st.query_params["game_id"] = str(game_id)
         st.rerun()
 
     st.divider()
@@ -272,6 +313,7 @@ def show_dashboard(game_id, lang):
     if not latest_state:
         st.warning("Game data missing. Resetting game session.")
         st.session_state.game_id = None
+        st.query_params.pop("game_id", None)
         st.rerun()
 
     country_name = database.get_country_name(game_id)
@@ -647,6 +689,7 @@ def show_dashboard(game_id, lang):
     st.sidebar.divider()
     if st.sidebar.button(t(lang, "abandon_button"), type="secondary"):
         st.session_state.game_id = None
+        st.query_params.pop("game_id", None)
         st.rerun()
 
     # 4. Main UI Layout - Command Center (dense monitoring, minimal scrolling)
@@ -973,7 +1016,12 @@ def show_game_over_screen(latest_state, df_history, reason, country_name, game_i
     }
     if reason in reason_keys:
         title_key, body_key = reason_keys[reason]
-        message = f"{t(lang, title_key)}\n{t(lang, body_key)}"
+        # voted_out_body's threshold varies by difficulty (Easy 35% / Medium
+        # 40% / Hard 45%) - a hardcoded "40%" would be wrong on Easy or Hard.
+        body_kwargs = {}
+        if reason == "voted_out":
+            body_kwargs['threshold'] = database.get_difficulty_settings(game_id)["election_narrow_threshold"]
+        message = f"{t(lang, title_key)}\n{t(lang, body_key, **body_kwargs)}"
         if reason == "victory":
             st.success(message)
         else:
@@ -1052,10 +1100,12 @@ def show_game_over_screen(latest_state, df_history, reason, country_name, game_i
         with col_retry2:
             if st.button(t(lang, "back_to_menu_button"), type="secondary", width="stretch"):
                 st.session_state.game_id = None
+                st.query_params.pop("game_id", None)
                 st.rerun()
     else:
         if st.button(t(lang, "new_administration_button"), type="primary"):
             st.session_state.game_id = None
+            st.query_params.pop("game_id", None)
             st.rerun()
 
 if __name__ == "__main__":
