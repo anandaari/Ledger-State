@@ -14,6 +14,19 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+def render_language_selector(container, lang, key):
+    """Renders the id/en selectbox into whichever container (main area on the
+    start screen, sidebar on the dashboard) and updates st.session_state.lang.
+    Shared so both screens stay in sync without duplicating the mapping."""
+    lang_choice = container.selectbox(
+        t(lang, "language_label"),
+        ["Bahasa Indonesia", "English"],
+        index=0 if lang == 'id' else 1,
+        label_visibility="collapsed",
+        key=key,
+    )
+    st.session_state.lang = 'id' if lang_choice == "Bahasa Indonesia" else 'en'
+
 
 # Main logic
 def main():
@@ -40,21 +53,11 @@ def main():
     if 'lang' not in st.session_state:
         st.session_state.lang = 'id'
 
-    col_title, col_lang = st.columns([5, 1])
-    with col_title:
-        st.title("🏛️ LEDGER STATE")
-    with col_lang:
-        lang_choice = st.selectbox(
-            t(st.session_state.lang, "language_label"),
-            ["Bahasa Indonesia", "English"],
-            index=0 if st.session_state.lang == 'id' else 1,
-            label_visibility="collapsed"
-        )
-        st.session_state.lang = 'id' if lang_choice == "Bahasa Indonesia" else 'en'
+    # The title banner + language selector widget itself lives in whichever
+    # screen is active (a full banner on the start screen, a compact sidebar
+    # control on the dashboard) so returning players get a clean, title-free
+    # monitoring view instead of a repeated banner eating vertical space.
     lang = st.session_state.lang
-
-    st.write(t(lang, "app_tagline"))
-    st.divider()
 
     # Session State Game Initialization
     if 'game_id' not in st.session_state:
@@ -82,6 +85,16 @@ def main():
         show_dashboard(st.session_state.game_id, lang)
 
 def show_start_screen(lang):
+    col_title, col_lang = st.columns([5, 1])
+    with col_title:
+        st.title("🏛️ LEDGER STATE")
+    with col_lang:
+        render_language_selector(st, lang, key="start_lang_selector")
+    lang = st.session_state.lang
+
+    st.write(t(lang, "app_tagline"))
+    st.divider()
+
     # Continue Administration - the game's actual data lives in ledger.db and
     # is never lost, but st.session_state.game_id (which game THIS browser
     # tab is looking at) resets if the connection drops - e.g. the computer
@@ -205,6 +218,25 @@ def render_status_bar(label_text, value_pct, tier):
         <div style="background-color:{color}; width:{clamped}%; height:100%; border-radius:6px;"></div>
     </div>
     """, unsafe_allow_html=True)
+
+def apply_compact_chart_layout(fig, title, hovermode="x unified"):
+    """
+    Shared compact styling for every trend chart in the dashboard - shorter
+    height, tighter margins, and a horizontal legend instead of Plotly's
+    bulkier defaults, so a tab's charts fit with noticeably less scrolling.
+    Pass hovermode=None for non-timeseries charts (e.g. the demographics pie).
+    """
+    layout_kwargs = dict(
+        title=title,
+        template="plotly_dark",
+        height=260,
+        margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)),
+    )
+    if hovermode:
+        layout_kwargs["hovermode"] = hovermode
+    fig.update_layout(**layout_kwargs)
+    return fig
 
 def check_game_over(state, recent_happiness, recent_opposition, diff_settings, sandbox_mode):
     """
@@ -363,6 +395,16 @@ def show_dashboard(game_id, lang):
         return
 
     # 3. Sidebar Inputs (Policy Control)
+    # Compact brand/language row instead of the start screen's full banner -
+    # once a game is running, the main content area is dedicated entirely to
+    # monitoring data (no title/tagline taking up space above it).
+    col_brand, col_lang = st.sidebar.columns([3, 2])
+    with col_brand:
+        st.markdown("#### 🏛️ Ledger State")
+    with col_lang:
+        render_language_selector(st, lang, key="dashboard_lang_selector")
+    lang = st.session_state.lang
+
     st.sidebar.subheader(t(lang, "sidebar_cabinet_actions"))
     st.sidebar.write(t(lang, "sidebar_country", country=country_name))
     quarters_played = df_history['turn_year'].count() - 1
@@ -741,8 +783,13 @@ def show_dashboard(game_id, lang):
     if sandbox_mode:
         st.caption(t(lang, "sandbox_caption"))
 
-    # Row 1: Key Performance Indicators (KPIs) - grouped in a bordered card
-    with st.container(border=True):
+    # Row 1: Key Performance Indicators (KPIs) + Row 2: Monitoring - merged
+    # into a single bordered card (reusing the same container object across
+    # both `with` blocks below) instead of two separate boxes, so the two
+    # most-glanced-at rows read as one compact block with less border/
+    # padding overhead between them.
+    top_metrics_container = st.container(border=True)
+    with top_metrics_container:
         st.caption(t(lang, "kpi_card_label"))
         col1, col2, col3, col4 = st.columns(4)
 
@@ -800,8 +847,8 @@ def show_dashboard(game_id, lang):
         prev_approval = 0.6 * df_history['happiness'].iloc[-2] + 0.4 * (100.0 - df_history['opposition_strength'].iloc[-2])
         approval_delta = approval_rating - prev_approval
 
-    with st.container(border=True):
-        st.caption(t(lang, "monitor_card_label"))
+    with top_metrics_container:
+        st.divider()
         col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
         with col_m1:
             st.metric(t(lang, "monitor_employment_label"), f"{employment_pct:.1f}%", delta=f"{employment_delta:+.1f}%",
@@ -911,33 +958,33 @@ def show_dashboard(game_id, lang):
         gdp_local_series = database.to_local(df_history['gdp'], country_name)
         treasury_local_series = database.to_local(df_history['treasury'], country_name)
         fig_econ = go.Figure()
-        fig_econ.add_trace(go.Scatter(x=df_history['period_label'], y=gdp_local_series, mode='lines+markers', name=f"GDP ({currency_unit})", line=dict(color='#00FFCC')))
-        fig_econ.add_trace(go.Scatter(x=df_history['period_label'], y=treasury_local_series, mode='lines+markers', name=f"Treasury ({currency_unit})", line=dict(color='#FF5E5B')))
-        fig_econ.update_layout(title=t(lang, "tab1_chart_title"), template="plotly_dark", hovermode="x unified")
+        fig_econ.add_trace(go.Scatter(x=df_history['period_label'], y=gdp_local_series, mode='lines', name=f"GDP ({currency_unit})", line=dict(color='#00FFCC')))
+        fig_econ.add_trace(go.Scatter(x=df_history['period_label'], y=treasury_local_series, mode='lines', name=f"Treasury ({currency_unit})", line=dict(color='#FF5E5B')))
+        apply_compact_chart_layout(fig_econ, t(lang, "tab1_chart_title"))
         st.plotly_chart(fig_econ, width='stretch')
 
         # Inflation trend
         fig_inflation = go.Figure()
         fig_inflation.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['inflation_rate'] * 100.0,
-                                            mode='lines+markers', name="Inflasi (%)", line=dict(color='#FFD166')))
-        fig_inflation.update_layout(title=t(lang, "tab1_chart_inflation_title"), template="plotly_dark", hovermode="x unified")
+                                            mode='lines', name="Inflasi (%)", line=dict(color='#FFD166')))
+        apply_compact_chart_layout(fig_inflation, t(lang, "tab1_chart_inflation_title"))
         st.plotly_chart(fig_inflation, width='stretch')
 
         # Trade Balance trend - local currency, like the GDP/Treasury chart
         trade_balance_local_series = database.to_local(df_history['trade_balance'], country_name)
         fig_trade = go.Figure()
         fig_trade.add_trace(go.Scatter(x=df_history['period_label'], y=trade_balance_local_series,
-                                        mode='lines+markers', name=f"Neraca Dagang ({currency_unit})", line=dict(color='#06D6A0')))
-        fig_trade.update_layout(title=t(lang, "tab1_chart_trade_title"), template="plotly_dark", hovermode="x unified")
+                                        mode='lines', name=f"Neraca Dagang ({currency_unit})", line=dict(color='#06D6A0')))
+        apply_compact_chart_layout(fig_trade, t(lang, "tab1_chart_trade_title"))
         st.plotly_chart(fig_trade, width='stretch')
 
         # Inequality Index & Investor Confidence trend - both already 0-100 scale
         fig_stability = go.Figure()
         fig_stability.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['inequality_index'],
-                                            mode='lines+markers', name="Indeks Ketimpangan", line=dict(color='#EF476F')))
+                                            mode='lines', name="Indeks Ketimpangan", line=dict(color='#EF476F')))
         fig_stability.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['investor_confidence'],
-                                            mode='lines+markers', name="Kepercayaan Investor", line=dict(color='#118AB2')))
-        fig_stability.update_layout(title=t(lang, "tab1_chart_stability_title"), template="plotly_dark", hovermode="x unified")
+                                            mode='lines', name="Kepercayaan Investor", line=dict(color='#118AB2')))
+        apply_compact_chart_layout(fig_stability, t(lang, "tab1_chart_stability_title"))
         st.plotly_chart(fig_stability, width='stretch')
 
     with tab2:
@@ -961,19 +1008,19 @@ def show_dashboard(game_id, lang):
                       help=t(lang, "public_safety_index_help"))
 
         fig_indices = go.Figure()
-        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['education_index'], mode='lines+markers', name='Education', line=dict(dash='dash', color='#FFD166')))
-        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['health_index'], mode='lines+markers', name='Healthcare', line=dict(dash='dash', color='#06D6A0')))
-        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['infrastructure'], mode='lines+markers', name='Infrastructure', line=dict(dash='dash', color='#118AB2')))
-        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness'], mode='lines+markers', name='Happiness (%)', line=dict(width=3, color='#EF476F')))
-        fig_indices.update_layout(title=t(lang, "tab2_chart_title"), template="plotly_dark")
+        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['education_index'], mode='lines', name='Education', line=dict(dash='dash', color='#FFD166')))
+        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['health_index'], mode='lines', name='Healthcare', line=dict(dash='dash', color='#06D6A0')))
+        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['infrastructure'], mode='lines', name='Infrastructure', line=dict(dash='dash', color='#118AB2')))
+        fig_indices.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness'], mode='lines', name='Happiness (%)', line=dict(width=3, color='#EF476F')))
+        apply_compact_chart_layout(fig_indices, t(lang, "tab2_chart_title"))
         st.plotly_chart(fig_indices, width='stretch')
 
         fig_welfare_safety = go.Figure()
         fig_welfare_safety.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['welfare_index'],
-                                                  mode='lines+markers', name='Welfare Index', line=dict(color='#FF9F1C')))
+                                                  mode='lines', name='Welfare Index', line=dict(color='#FF9F1C')))
         fig_welfare_safety.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['public_safety_index'],
-                                                  mode='lines+markers', name='Public Safety Index', line=dict(color='#8338EC')))
-        fig_welfare_safety.update_layout(title=t(lang, "tab2_chart2_title"), template="plotly_dark")
+                                                  mode='lines', name='Public Safety Index', line=dict(color='#8338EC')))
+        apply_compact_chart_layout(fig_welfare_safety, t(lang, "tab2_chart2_title"))
         st.plotly_chart(fig_welfare_safety, width='stretch')
 
     with tab3:
@@ -1003,7 +1050,7 @@ def show_dashboard(game_id, lang):
             fig_pie = go.Figure(data=[go.Pie(labels=labels, values=values, hole=.3)])
             fig_pie.update_traces(hoverinfo='label+percent', textinfo='value+percent', textfont_size=12,
                                   marker=dict(colors=colors, line=dict(color='#000000', width=1)))
-            fig_pie.update_layout(title=t(lang, "class_distribution_title"), template="plotly_dark")
+            apply_compact_chart_layout(fig_pie, t(lang, "class_distribution_title"), hovermode=None)
             st.plotly_chart(fig_pie, width='stretch')
 
         with col_table:
@@ -1024,19 +1071,19 @@ def show_dashboard(game_id, lang):
 
             # Show historical mobility chart
             fig_mobility = go.Figure()
-            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_low'], mode='lines+markers', name=t(lang, "label_low_income"), stackgroup='one', line=dict(color='#FF9F1C')))
-            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_mid'], mode='lines+markers', name=t(lang, "label_mid_income"), stackgroup='one', line=dict(color='#FFD166')))
-            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_high'], mode='lines+markers', name=t(lang, "label_high_income"), stackgroup='one', line=dict(color='#06D6A0')))
-            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_elder'], mode='lines+markers', name=t(lang, "label_pensioners"), stackgroup='one', line=dict(color='#118AB2')))
-            fig_mobility.update_layout(title=t(lang, "mobility_chart_title"), template="plotly_dark")
+            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_low'], mode='lines', name=t(lang, "label_low_income"), stackgroup='one', line=dict(color='#FF9F1C')))
+            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_mid'], mode='lines', name=t(lang, "label_mid_income"), stackgroup='one', line=dict(color='#FFD166')))
+            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_high'], mode='lines', name=t(lang, "label_high_income"), stackgroup='one', line=dict(color='#06D6A0')))
+            fig_mobility.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['pop_elder'], mode='lines', name=t(lang, "label_pensioners"), stackgroup='one', line=dict(color='#118AB2')))
+            apply_compact_chart_layout(fig_mobility, t(lang, "mobility_chart_title"))
             st.plotly_chart(fig_mobility, width='stretch')
 
         fig_class_happiness = go.Figure()
-        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_low'], mode='lines+markers', name=t(lang, "label_low_income"), line=dict(color='#FF9F1C')))
-        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_mid'], mode='lines+markers', name=t(lang, "label_mid_income"), line=dict(color='#FFD166')))
-        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_high'], mode='lines+markers', name=t(lang, "label_high_income"), line=dict(color='#06D6A0')))
-        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_elder'], mode='lines+markers', name=t(lang, "label_pensioners"), line=dict(color='#118AB2')))
-        fig_class_happiness.update_layout(title=t(lang, "class_happiness_chart_title"), template="plotly_dark")
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_low'], mode='lines', name=t(lang, "label_low_income"), line=dict(color='#FF9F1C')))
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_mid'], mode='lines', name=t(lang, "label_mid_income"), line=dict(color='#FFD166')))
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_high'], mode='lines', name=t(lang, "label_high_income"), line=dict(color='#06D6A0')))
+        fig_class_happiness.add_trace(go.Scatter(x=df_history['period_label'], y=df_history['happiness_elder'], mode='lines', name=t(lang, "label_pensioners"), line=dict(color='#118AB2')))
+        apply_compact_chart_layout(fig_class_happiness, t(lang, "class_happiness_chart_title"))
         st.plotly_chart(fig_class_happiness, width='stretch')
 
     with tab4:

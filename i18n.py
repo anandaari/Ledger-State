@@ -155,7 +155,6 @@ STRINGS = {
         "year_header": "{country} — {year} Q{quarter}",
         "sandbox_caption": "🎮 Mode Sandbox aktif — tahun tanpa batas. Krisis, pemilu, dan risiko kalah tetap berjalan seperti biasa.",
         "kpi_card_label": "📊 INDIKATOR UTAMA",
-        "monitor_card_label": "🧭 MONITORING & POLITIK",
 
         "kpi_gdp_label": "Produk Domestik Bruto (GDP)",
         "kpi_gdp_help": "Total nilai output ekonomi tahunan. Menentukan besaran anggaran (dibatasi hingga 12.5% GDP per kuartal, setara 50% GDP per tahun) dan basis penerimaan pajak.",
@@ -439,7 +438,6 @@ STRINGS = {
         "year_header": "{country} — {year} Q{quarter}",
         "sandbox_caption": "🎮 Sandbox Mode active — unlimited years. Crises, elections, and loss conditions still work as usual.",
         "kpi_card_label": "📊 KEY INDICATORS",
-        "monitor_card_label": "🧭 MONITORING & POLITICS",
 
         "kpi_gdp_label": "Gross Domestic Product (GDP)",
         "kpi_gdp_help": "Total annual economic output. Determines budget size (capped at 12.5% of GDP per quarter, equivalent to 50% per year) and the tax base.",

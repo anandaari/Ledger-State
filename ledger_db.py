@@ -457,6 +457,131 @@ RANDOM_EVENTS = {
             "Terima Risiko & Bertahan": {"happiness": -10.0, "opposition_strength": 8.0},
         },
     },
+
+    # --- Struktural: satu event per pilar anggaran (Pendidikan, Kesehatan,
+    # Infrastruktur, Kesejahteraan Sosial, Keamanan) sehingga kelimanya kini
+    # punya narrative event sendiri, bukan cuma index yang dipantau pasif. ---
+    "school_funding_gap": {
+        "title": "Kesenjangan Dana Sekolah Terungkap",
+        "description": "Investigasi media menemukan banyak sekolah negeri kekurangan dana operasional dasar, memicu kemarahan publik.",
+        "condition": lambda s: s['education_index'] < 45.0,
+        "choices": {
+            "Suntik Dana Darurat": {"treasury": -40.0, "education_index": 8.0, "happiness": 5.0},
+            "Janjikan Reformasi Bertahap": {"opposition_strength": 6.0, "happiness": -5.0},
+        },
+    },
+    "health_worker_strike": {
+        "title": "Mogok Kerja Tenaga Medis",
+        "description": "Tenaga medis di rumah sakit pemerintah mogok kerja, menuntut kenaikan insentif dan perbaikan fasilitas.",
+        "condition": lambda s: s['health_index'] < 45.0,
+        "choices": {
+            "Penuhi Tuntutan Insentif": {"treasury": -35.0, "health_index": 8.0, "happiness": 4.0},
+            "Tunda, Anggaran Terbatas": {"health_index": -5.0, "opposition_strength": 5.0},
+        },
+    },
+    "infrastructure_investment_offer": {
+        "title": "Tawaran Investasi Infrastruktur Asing",
+        "description": "Konsorsium asing menawarkan pendanaan proyek infrastruktur skala besar, dengan syarat kepemilikan sebagian aset.",
+        "condition": lambda s: s['infrastructure'] < 55.0,
+        "choices": {
+            "Terima, Percepat Pembangunan": {"infrastructure": 10.0, "corruption_index": 5.0, "foreign_relations": 5.0},
+            "Danai Mandiri, Jaga Kedaulatan": {"treasury": -45.0, "infrastructure": 8.0},
+        },
+    },
+    "welfare_ngo_request": {
+        "title": "LSM Kesejahteraan Sosial Minta Tambahan Anggaran",
+        "description": "Koalisi LSM menuntut penambahan anggaran jaring pengaman sosial menyusul laporan kemiskinan yang meningkat.",
+        "condition": lambda s: s['welfare_index'] < 45.0,
+        "choices": {
+            "Penuhi Sebagian Tuntutan": {"treasury": -35.0, "welfare_index": 8.0, "happiness": 5.0},
+            "Tolak, Anggaran Sudah Ketat": {"opposition_strength": 7.0, "happiness": -5.0},
+        },
+    },
+    "police_reform_demand": {
+        "title": "Tuntutan Reformasi Kepolisian",
+        "description": "Insiden kekerasan aparat memicu tuntutan reformasi menyeluruh terhadap institusi keamanan.",
+        "condition": lambda s: s['public_safety_index'] < 40.0,
+        "choices": {
+            "Reformasi Menyeluruh": {"treasury": -30.0, "public_safety_index": 8.0, "corruption_index": -5.0},
+            "Bela Institusi yang Ada": {"opposition_strength": 8.0, "happiness": -8.0},
+        },
+    },
+
+    # --- Politik: koalisi, korupsi, diplomasi, dan tekanan oposisi. ---
+    "coalition_partner_threat": {
+        "title": "Partai Koalisi Ancam Keluar",
+        "description": "Salah satu partai koalisi kecil mengancam menarik dukungan kecuali diberi jatah kursi menteri tambahan.",
+        "condition": lambda s: s['coalition_support'] < 30.0,
+        "choices": {
+            "Beri Konsesi Kursi Menteri": {"treasury": -20.0, "coalition_support": 12.0, "corruption_index": 5.0},
+            "Biarkan Mereka Pergi": {"coalition_support": -10.0, "opposition_strength": 8.0},
+        },
+    },
+    "anti_corruption_probe": {
+        "title": "Investigasi Anti-Korupsi Menyasar Lingkaran Dalam",
+        "description": "Lembaga anti-korupsi membuka investigasi terhadap beberapa tokoh dekat pemerintahan Anda.",
+        "condition": lambda s: s['corruption_index'] > 50.0,
+        "choices": {
+            "Kooperatif Penuh": {"corruption_index": -15.0, "treasury": -15.0, "happiness": 6.0},
+            "Halangi Investigasi": {"corruption_index": 10.0, "opposition_strength": 12.0},
+        },
+    },
+    "state_visit_invitation": {
+        "title": "Undangan Kunjungan Kenegaraan",
+        "description": "Kepala negara sahabat mengundang kunjungan resmi untuk mempererat hubungan bilateral.",
+        "condition": lambda s: True,
+        "choices": {
+            "Terima Kunjungan": {"treasury": -10.0, "foreign_relations": 10.0},
+            "Tolak, Fokus Domestik": {"happiness": 3.0},
+        },
+    },
+    "referendum_proposal": {
+        "title": "Oposisi Mengusulkan Referendum",
+        "description": "Oposisi menuntut referendum langsung atas arah kebijakan pemerintah, mengklaim mewakili suara rakyat.",
+        "condition": lambda s: s['opposition_strength'] > 55.0,
+        "choices": {
+            "Setujui Referendum": {"opposition_strength": -8.0, "coalition_support": -5.0},
+            "Tolak Usulan": {"opposition_strength": 10.0, "happiness": -6.0},
+        },
+    },
+
+    # --- Ekonomi Global: inflasi, kepercayaan investor, perdagangan, ketimpangan. ---
+    "commodity_price_spike": {
+        "title": "Lonjakan Harga Komoditas Global",
+        "description": "Gejolak pasar komoditas dunia mendorong kenaikan harga barang kebutuhan pokok secara tajam.",
+        "condition": lambda s: True,
+        "choices": {
+            "Subsidi Harga untuk Rakyat": {"treasury": -30.0, "inflation_rate": -0.008, "happiness": 5.0},
+            "Biarkan Pasar Menyesuaikan": {"inflation_rate": 0.01, "happiness": -6.0},
+        },
+    },
+    "capital_flight_risk": {
+        "title": "Ancaman Pelarian Modal Asing",
+        "description": "Investor asing mulai menarik dana keluar akibat rendahnya kepercayaan terhadap stabilitas ekonomi.",
+        "condition": lambda s: s['investor_confidence'] < 40.0,
+        "choices": {
+            "Tawarkan Insentif Pajak Investasi": {"treasury": -25.0, "investor_confidence": 10.0},
+            "Biarkan Terjadi": {"investor_confidence": -8.0, "treasury": -15.0},
+        },
+    },
+    "trade_bloc_proposal": {
+        "title": "Proposal Bergabung Blok Dagang Regional",
+        "description": "Sebuah blok dagang regional menawarkan keanggotaan dengan janji akses pasar yang lebih luas.",
+        "condition": lambda s: s['trade_balance'] < 0.0,
+        "choices": {
+            "Bergabung dengan Blok Dagang": {"treasury": -20.0, "trade_balance": 15.0, "foreign_relations": 8.0},
+            "Tetap Independen": {"foreign_relations": -3.0},
+        },
+    },
+    "inequality_protests": {
+        "title": "Ketimpangan Ekonomi Memicu Gelombang Protes",
+        "description": "Laporan ketimpangan ekonomi yang melebar memicu demonstrasi menuntut redistribusi kekayaan.",
+        "condition": lambda s: s['inequality_index'] > 65.0,
+        "choices": {
+            "Umumkan Reformasi Pajak Progresif": {"inequality_index": -10.0, "treasury": -15.0, "happiness": 6.0},
+            "Tolak Tuntutan Reformasi": {"opposition_strength": 10.0, "happiness": -8.0},
+        },
+    },
 }
 
 # Static "what to fix" tips shown under News Feed / Year Review entries.
@@ -527,6 +652,13 @@ EFFECT_FIELD_META = {
     'education_index': {'icon': '🎓', 'label': 'Pendidikan', 'unit': '%'},
     'crime_rate': {'icon': '🚔', 'label': 'Kriminalitas', 'unit': '%', 'scale': 100},
     'foreign_relations': {'icon': '🌐', 'label': 'Hubungan LN', 'unit': '%'},
+    'inflation_rate': {'icon': '💹', 'label': 'Inflasi', 'unit': '%', 'scale': 100},
+    'welfare_index': {'icon': '🤝', 'label': 'Welfare Index', 'unit': '%'},
+    'public_safety_index': {'icon': '🚨', 'label': 'Public Safety Index', 'unit': '%'},
+    'coalition_support': {'icon': '🏛️', 'label': 'Koalisi', 'unit': '%'},
+    'trade_balance': {'icon': '🚢', 'label': 'Neraca Dagang', 'is_currency': True},
+    'investor_confidence': {'icon': '💼', 'label': 'Kepercayaan Investor', 'unit': '%'},
+    'inequality_index': {'icon': '⚖️', 'label': 'Ketimpangan', 'unit': '%'},
 }
 
 def format_effects_summary(effects, country_name):
@@ -1433,7 +1565,8 @@ def resolve_pending_event(game_id, event_key, choice_label, db_path=DB_PATH):
     cursor.execute("""
         SELECT history_id, turn_year, treasury, gdp, happiness, opposition_strength,
                corruption_index, infrastructure, health_index, education_index, crime_rate, foreign_relations,
-               inflation_rate
+               inflation_rate, welfare_index, public_safety_index, coalition_support, trade_balance,
+               investor_confidence, inequality_index
         FROM nation_history WHERE game_id = ? ORDER BY turn_year DESC LIMIT 1
     """, (game_id,))
     row = cursor.fetchone()
@@ -1443,7 +1576,8 @@ def resolve_pending_event(game_id, event_key, choice_label, db_path=DB_PATH):
 
     (history_id, turn_year, treasury, gdp, happiness, opposition_strength,
      corruption_index, infrastructure, health_index, education_index, crime_rate, foreign_relations,
-     inflation_rate) = row
+     inflation_rate, welfare_index, public_safety_index, coalition_support, trade_balance,
+     investor_confidence, inequality_index) = row
 
     new_treasury = treasury + effects.get('treasury', 0.0)
     new_gdp = max(10.0, gdp + effects.get('gdp', 0.0))
@@ -1456,15 +1590,23 @@ def resolve_pending_event(game_id, event_key, choice_label, db_path=DB_PATH):
     new_crime = max(0.0, min(1.0, crime_rate + effects.get('crime_rate', 0.0)))
     new_relations = max(0.0, min(100.0, foreign_relations + effects.get('foreign_relations', 0.0)))
     new_inflation = max(-0.01, min(0.06, inflation_rate + effects.get('inflation_rate', 0.0)))
+    new_welfare = max(0.0, min(100.0, welfare_index + effects.get('welfare_index', 0.0)))
+    new_safety = max(0.0, min(100.0, public_safety_index + effects.get('public_safety_index', 0.0)))
+    new_coalition = max(0.0, min(100.0, coalition_support + effects.get('coalition_support', 0.0)))
+    new_trade_balance = trade_balance + effects.get('trade_balance', 0.0)
+    new_confidence = max(0.0, min(100.0, investor_confidence + effects.get('investor_confidence', 0.0)))
+    new_inequality = max(0.0, min(100.0, inequality_index + effects.get('inequality_index', 0.0)))
 
     cursor.execute("""
         UPDATE nation_history
         SET treasury = ?, gdp = ?, happiness = ?, opposition_strength = ?,
             corruption_index = ?, infrastructure = ?, health_index = ?, education_index = ?, crime_rate = ?,
-            foreign_relations = ?, inflation_rate = ?
+            foreign_relations = ?, inflation_rate = ?, welfare_index = ?, public_safety_index = ?,
+            coalition_support = ?, trade_balance = ?, investor_confidence = ?, inequality_index = ?
         WHERE history_id = ?
     """, (new_treasury, new_gdp, new_happiness, new_opposition, new_corruption,
-          new_infrastructure, new_health, new_education, new_crime, new_relations, new_inflation, history_id))
+          new_infrastructure, new_health, new_education, new_crime, new_relations, new_inflation,
+          new_welfare, new_safety, new_coalition, new_trade_balance, new_confidence, new_inequality, history_id))
 
     cursor.execute("DELETE FROM pending_events WHERE game_id = ?", (game_id,))
     conn.commit()
