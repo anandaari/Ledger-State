@@ -134,11 +134,11 @@ COUNTRY_PRESETS = {
 
 PARTY_PRESETS = {
     "Partai Rakyat Progresif": {
-        "tagline": "Pajak besar untuk kelompok kaya, jaring pengaman sosial kuat.",
+        "tagline_key": "party_tagline_progresif",
         "ideology": {"tax_high": 1, "welfare": 1, "security": -1},
     },
     "Partai Nasional Konservatif": {
-        "tagline": "Pajak rendah, anggaran keamanan & pertahanan diprioritaskan.",
+        "tagline_key": "party_tagline_konservatif",
         "ideology": {"tax_high": -1, "welfare": -1, "security": 1},
     },
 }

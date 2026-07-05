@@ -159,10 +159,10 @@ def show_start_screen(lang):
 
         st.markdown(f"""
         **{party_name}** {t(lang, "your_party_suffix")}
-        {database.PARTY_PRESETS[party_name]['tagline']}
+        {t(lang, database.PARTY_PRESETS[party_name]['tagline_key'])}
 
         **{opposition_party}** {t(lang, "auto_opposition_suffix")}
-        {database.PARTY_PRESETS[opposition_party]['tagline']}
+        {t(lang, database.PARTY_PRESETS[opposition_party]['tagline_key'])}
         """)
         st.warning(t(lang, "opposition_warning"))
 
