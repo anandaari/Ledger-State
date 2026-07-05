@@ -679,7 +679,21 @@ def show_dashboard(game_id, lang):
             recent_happiness.append(new_state['happiness'])
             recent_opposition.append(new_state['opposition_strength'])
             is_over, _ = check_game_over(new_state, recent_happiness, recent_opposition, diff_settings, sandbox_mode)
-            if is_over or database.get_pending_event(game_id):
+            if is_over:
+                break
+
+            # Minister advice is a zero-cost-to-decline flavor notification,
+            # not a real decision - auto-declining it during Auto-Advance
+            # keeps the loop moving instead of interrupting almost every
+            # quarter once a full cabinet is hired (was stopping ~90% of the
+            # time). Genuine narrative events (RANDOM_EVENTS) still stop the
+            # loop below since those have real, distinct consequences.
+            pending = database.get_pending_event(game_id)
+            if pending and pending['event_key'] == "minister_advice":
+                database.resolve_pending_event(game_id, "minister_advice", "Abaikan Saran")
+                pending = None
+
+            if pending:
                 break
         if turns_done > 0:
             st.session_state[f'year_review_{game_id}'] = (start_turn + 1, current_state['turn_year'])
