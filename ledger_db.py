@@ -132,6 +132,20 @@ COUNTRY_PRESETS = {
     }
 }
 
+# Flag emoji + a flag-inspired accent color per country, purely cosmetic (no
+# gameplay effect) - gives each playthrough a distinct visual identity
+# instead of every country looking like the same generic dark dashboard.
+COUNTRY_VISUALS = {
+    "Indonesia": {"flag": "🇮🇩", "accent": "#CE1126"},
+    "Singapore": {"flag": "🇸🇬", "accent": "#ED2939"},
+    "United States": {"flag": "🇺🇸", "accent": "#3C3B6E"},
+    "Japan": {"flag": "🇯🇵", "accent": "#BC002D"},
+    "Germany": {"flag": "🇩🇪", "accent": "#FFCE00"},
+}
+
+def get_country_visual(country_name):
+    return COUNTRY_VISUALS.get(country_name, {"flag": "🏳️", "accent": "#94A3B8"})
+
 PARTY_PRESETS = {
     "Partai Rakyat Progresif": {
         "tagline_key": "party_tagline_progresif",

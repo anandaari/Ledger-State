@@ -126,7 +126,10 @@ def show_start_screen(lang):
     with col1:
         username = st.text_input(t(lang, "label_username"), value=st.session_state.get("username", ""), max_chars=30)
         nation_name = st.text_input(t(lang, "label_regime_name"), value="Regime I", max_chars=30)
-        country_name = st.selectbox(t(lang, "label_select_country"), ["Indonesia", "Singapore", "United States", "Japan", "Germany"])
+        country_name = st.selectbox(
+            t(lang, "label_select_country"), ["Indonesia", "Singapore", "United States", "Japan", "Germany"],
+            format_func=lambda name: f"{database.get_country_visual(name)['flag']} {name}"
+        )
         difficulty = st.selectbox(t(lang, "label_difficulty"), ["Easy", "Medium", "Hard"])
 
         # Display description of starting presets
@@ -137,8 +140,9 @@ def show_start_screen(lang):
         specialization = preset.get('trade_specialization')
         specialization_label = t(lang, "trade_spec_export") if specialization == 'export' else t(lang, "trade_spec_import")
         specialization_bonus_pct = (database.TRADE_SPECIALIZATION_BONUS - 1.0) * 100
+        country_flag = database.get_country_visual(country_name)['flag']
         st.markdown(f"""
-        {t(lang, "country_briefing_title", country=country_name)}
+        {t(lang, "country_briefing_title", country=f"{country_flag} {country_name}")}
         * {t(lang, "label_starting_population", value=total_starting_pop / 1000000)}
         * {t(lang, "label_starting_gdp", value=database.format_currency(preset['gdp'], country_name))}
         * {t(lang, "label_starting_treasury", value=database.format_currency(preset['treasury'], country_name), status=treasury_status)}
@@ -319,25 +323,46 @@ def compute_budget_projection(game_id, country_name, state, inputs, diff_setting
         'crisis_reason': 'deficit' if deficit_exceeded else ('opposition' if opposition_contests else None),
     }
 
+# Color-coded left border + icon per event type - replaces the flat native
+# st.error/info/warning boxes with a card styled like render_status_bar's
+# custom HTML, so the News Feed reads as one coherent "game log" instead of
+# a stack of generic alert banners.
+EVENT_CARD_STYLE = {
+    'CRISIS': {'color': '#EF4444', 'icon': '⚠️'},
+    'ECONOMIC': {'color': '#10B981', 'icon': '📈'},
+    'SOCIAL': {'color': '#3B82F6', 'icon': '👥'},
+}
+
 def render_event_entry(ev, lang, show_year=True, crisis_requirements=None):
     cal_year, cal_quarter = database.get_calendar_label(ev['turn_year'])
     title = ev['title']
     desc = ev['description']
     ev_type = ev['event_type']
-    prefix = f"[{cal_year} Q{cal_quarter}] " if show_year else ""
+    style = EVENT_CARD_STYLE.get(ev_type, {'color': '#94A3B8', 'icon': 'ℹ️'})
 
-    if ev_type == 'CRISIS':
-        st.error(f"**⚠️ {prefix}{title}** — {desc}")
-    elif ev_type == 'ECONOMIC':
-        st.info(f"**📈 {prefix}{title}** — {desc}")
-    elif ev_type == 'SOCIAL':
-        st.warning(f"**👥 {prefix}{title}** — {desc}")
-    else:
-        st.write(f"**ℹ️ {prefix}{title}** — {desc}")
+    time_badge_html = ""
+    if show_year:
+        time_badge_html = (
+            f'<span style="background-color:#2A303C; border-radius:4px; padding:1px 7px; '
+            f'font-size:0.7rem; color:#94A3B8; margin-left:8px; white-space:nowrap;">'
+            f'{cal_year} Q{cal_quarter}</span>'
+        )
 
     advice = database.get_event_advice(ev, crisis_requirements)
+    advice_html = ""
     if advice:
-        st.caption(f"{t(lang, 'event_advice_prefix')}: {advice}")
+        advice_html = (
+            f'<div style="margin-top:6px; padding-top:6px; border-top:1px solid #2A303C; '
+            f'font-size:0.8rem; color:#FBBF24;">💡 {t(lang, "event_advice_prefix")}: {advice}</div>'
+        )
+
+    st.markdown(f"""
+    <div style="background-color:#1A1F29; border-left:4px solid {style['color']}; border-radius:6px; padding:10px 14px; margin-bottom:8px;">
+        <div style="font-size:0.95rem;"><span style="font-size:1.05rem;">{style['icon']}</span> <strong>{title}</strong>{time_badge_html}</div>
+        <div style="font-size:0.85rem; color:#CBD5E1; margin-top:4px;">{desc}</div>
+        {advice_html}
+    </div>
+    """, unsafe_allow_html=True)
 
 def show_dashboard(game_id, lang):
     # 1. Fetch current game state
@@ -349,6 +374,7 @@ def show_dashboard(game_id, lang):
         st.rerun()
 
     country_name = database.get_country_name(game_id)
+    country_visual = database.get_country_visual(country_name)
     current_cal_year, current_cal_quarter = database.get_calendar_label(latest_state['turn_year'])
 
     def fmt_money(amount, decimals=1, signed=False):
@@ -406,7 +432,7 @@ def show_dashboard(game_id, lang):
     lang = st.session_state.lang
 
     st.sidebar.subheader(t(lang, "sidebar_cabinet_actions"))
-    st.sidebar.write(t(lang, "sidebar_country", country=country_name))
+    st.sidebar.write(t(lang, "sidebar_country", country=f"{country_visual['flag']} {country_name}"))
     quarters_played = df_history['turn_year'].count() - 1
     st.sidebar.write(t(lang, "sidebar_simulated_years", quarters=quarters_played, years=quarters_played / 4.0))
 
@@ -793,7 +819,14 @@ def show_dashboard(game_id, lang):
             st.caption(t(lang, "force_decree_caption"))
         st.divider()
 
-    st.subheader(t(lang, "year_header", country=country_name, year=current_cal_year, quarter=current_cal_quarter))
+    # Country name gets a flag-accent color instead of the theme's flat
+    # default text - a small per-country identity touch on the header that's
+    # visible on every single turn.
+    colored_country = f'<span style="color:{country_visual["accent"]};">{country_visual["flag"]} {country_name}</span>'
+    st.markdown(
+        f"### {t(lang, 'year_header', country=colored_country, year=current_cal_year, quarter=current_cal_quarter)}",
+        unsafe_allow_html=True
+    )
     if sandbox_mode:
         st.caption(t(lang, "sandbox_caption"))
 
