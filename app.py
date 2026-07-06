@@ -14,6 +14,32 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+def get_theme_colors():
+    """
+    Reads the player's ACTUAL active theme (st.context.theme reflects
+    whatever they picked via Streamlit's own Settings menu - light, dark, or
+    system default - not just our config.toml default) and returns the
+    matching palette for every custom-HTML element in the app (News Feed
+    cards, status bars, slider ring, Plotly charts). Defaults to the dark
+    palette if the theme type isn't reported (e.g. very old browsers).
+    """
+    theme_type = st.context.theme.get("type") if hasattr(st, "context") else None
+    if theme_type == "light":
+        return {
+            'card_bg': '#F1F5F9', 'card_border_track': '#E2E8F0',
+            'card_desc_text': '#334155', 'badge_bg': '#E2E8F0', 'badge_text': '#475569',
+            'advice_text': '#B45309',
+            'slider_ring': 'rgba(15,23,42,0.35)', 'slider_ring_border': '#0F172A',
+            'plotly_template': 'plotly_white',
+        }
+    return {
+        'card_bg': '#1A1F29', 'card_border_track': '#262B36',
+        'card_desc_text': '#CBD5E1', 'badge_bg': '#2A303C', 'badge_text': '#94A3B8',
+        'advice_text': '#FBBF24',
+        'slider_ring': 'rgba(250,250,250,0.18)', 'slider_ring_border': '#FAFAFA',
+        'plotly_template': 'plotly_dark',
+    }
+
 def render_language_selector(container, lang, key):
     """Renders the id/en selectbox into whichever container (main area on the
     start screen, sidebar on the dashboard) and updates st.session_state.lang.
@@ -36,17 +62,19 @@ def main():
     database.init_db()
 
     # Slider thumbs otherwise rely solely on the theme's primaryColor fill,
-    # which can read as low-contrast against a dark track/background - add a
+    # which can read as low-contrast against the track/background - add a
     # visible ring so the handle is legible regardless of the accent color.
-    st.markdown("""
+    # Ring color follows the player's active theme (light vs dark).
+    theme_colors = get_theme_colors()
+    st.markdown(f"""
     <style>
-    div[data-baseweb="slider"] div[role="slider"] {
-        box-shadow: 0 0 0 3px rgba(250,250,250,0.18);
-        border: 2px solid #FAFAFA !important;
-    }
-    div[data-testid="stSlider"] {
+    div[data-baseweb="slider"] div[role="slider"] {{
+        box-shadow: 0 0 0 3px {theme_colors['slider_ring']};
+        border: 2px solid {theme_colors['slider_ring_border']} !important;
+    }}
+    div[data-testid="stSlider"] {{
         padding-top: 6px;
-    }
+    }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -213,12 +241,14 @@ STATUS_BAR_COLORS = {
 def render_status_bar(label_text, value_pct, tier):
     """Custom HTML progress bar with a semantic color (red/amber/green/gray)
     instead of st.progress's fixed theme-accent fill, so severity is legible
-    at a glance instead of every bar looking visually identical."""
+    at a glance instead of every bar looking visually identical. Track
+    background follows the player's active light/dark theme."""
     color = STATUS_BAR_COLORS[tier]
+    track_bg = get_theme_colors()['card_border_track']
     clamped = max(0.0, min(100.0, value_pct))
     st.markdown(f"""
     <div style="font-size:0.875rem; margin-bottom:3px;">{label_text}</div>
-    <div style="background-color:#262B36; border-radius:6px; height:10px; width:100%; overflow:hidden;">
+    <div style="background-color:{track_bg}; border-radius:6px; height:10px; width:100%; overflow:hidden;">
         <div style="background-color:{color}; width:{clamped}%; height:100%; border-radius:6px;"></div>
     </div>
     """, unsafe_allow_html=True)
@@ -232,7 +262,7 @@ def apply_compact_chart_layout(fig, title, hovermode="x unified"):
     """
     layout_kwargs = dict(
         title=title,
-        template="plotly_dark",
+        template=get_theme_colors()['plotly_template'],
         height=260,
         margin=dict(l=10, r=10, t=40, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)),
@@ -339,12 +369,13 @@ def render_event_entry(ev, lang, show_year=True, crisis_requirements=None):
     desc = ev['description']
     ev_type = ev['event_type']
     style = EVENT_CARD_STYLE.get(ev_type, {'color': '#94A3B8', 'icon': 'ℹ️'})
+    theme_colors = get_theme_colors()
 
     time_badge_html = ""
     if show_year:
         time_badge_html = (
-            f'<span style="background-color:#2A303C; border-radius:4px; padding:1px 7px; '
-            f'font-size:0.7rem; color:#94A3B8; margin-left:8px; white-space:nowrap;">'
+            f'<span style="background-color:{theme_colors["badge_bg"]}; border-radius:4px; padding:1px 7px; '
+            f'font-size:0.7rem; color:{theme_colors["badge_text"]}; margin-left:8px; white-space:nowrap;">'
             f'{cal_year} Q{cal_quarter}</span>'
         )
 
@@ -352,14 +383,14 @@ def render_event_entry(ev, lang, show_year=True, crisis_requirements=None):
     advice_html = ""
     if advice:
         advice_html = (
-            f'<div style="margin-top:6px; padding-top:6px; border-top:1px solid #2A303C; '
-            f'font-size:0.8rem; color:#FBBF24;">💡 {t(lang, "event_advice_prefix")}: {advice}</div>'
+            f'<div style="margin-top:6px; padding-top:6px; border-top:1px solid {theme_colors["badge_bg"]}; '
+            f'font-size:0.8rem; color:{theme_colors["advice_text"]};">💡 {t(lang, "event_advice_prefix")}: {advice}</div>'
         )
 
     st.markdown(f"""
-    <div style="background-color:#1A1F29; border-left:4px solid {style['color']}; border-radius:6px; padding:10px 14px; margin-bottom:8px;">
+    <div style="background-color:{theme_colors['card_bg']}; border-left:4px solid {style['color']}; border-radius:6px; padding:10px 14px; margin-bottom:8px;">
         <div style="font-size:0.95rem;"><span style="font-size:1.05rem;">{style['icon']}</span> <strong>{title}</strong>{time_badge_html}</div>
-        <div style="font-size:0.85rem; color:#CBD5E1; margin-top:4px;">{desc}</div>
+        <div style="font-size:0.85rem; color:{theme_colors['card_desc_text']}; margin-top:4px;">{desc}</div>
         {advice_html}
     </div>
     """, unsafe_allow_html=True)

@@ -9,4 +9,7 @@ secondaryBackgroundColor = "#1B1F27"
 textColor = "#FAFAFA"
 
 [client]
-toolbarMode = "minimal"
+# "viewer" keeps the end-user Settings menu (Light/Dark/System theme picker,
+# wide-mode, print) but hides developer-only tools like Deploy/Clear cache -
+# needed so players can actually switch theme; "minimal" hid this entirely.
+toolbarMode = "viewer"
